@@ -1,0 +1,1417 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mini-Discord</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            discord: {
+              dark: '#36393f',
+              darker: '#2f3136',
+              darkest: '#202225',
+              blurple: '#5865F2',
+              green: '#57F287',
+              yellow: '#FEE75C',
+              red: '#ED4245',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { font-family: 'Inter', system-ui, sans-serif; }
+    .scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+    .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: #202225; border-radius: 4px; }
+    .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #36393f; }
+    .message-group:hover { background: rgba(4,4,5,0.07); }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+    .modal-animate { animation: fadeIn 0.2s ease-out; }
+    .skeleton { background: linear-gradient(90deg, #36393f 25%, #2f3136 50%, #36393f 75%); background-size: 200% 100%; animation: skeleton 1.5s infinite; }
+    @keyframes skeleton { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+    .toast-enter { animation: toastIn 0.3s ease-out; }
+    @keyframes toastIn { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+    .typing-dot { animation: typingBounce 1.4s infinite; }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes typingBounce { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-4px); } }
+    .gif-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 4px; }
+    .emoji-btn { border: 1px solid rgba(255,255,255,0.1); }
+    .emoji-btn:hover { border-color: rgba(255,255,255,0.3); background: rgba(255,255,255,0.05); }
+  </style>
+</head>
+<body class="bg-discord-darkest text-gray-100 min-h-screen overflow-hidden">
+  <!-- ========== CONFIG ========== -->
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyAnUTCjnbxCEeMpmqfxsfzryUpiVqpp3SE",
+      authDomain: "mini-discord-b0977.firebaseapp.com",
+      projectId: "mini-discord-b0977",
+      storageBucket: "mini-discord-b0977.firebasestorage.app",
+      messagingSenderId: "999795104831",
+      appId: "1:999795104831:web:f76fdf43d6c889e8deec8a",
+      measurementId: "G-V0K3TN8183"
+    };
+    const GIPHY_API_KEY = "peAMzd2AaeUlKwbMp86bp1wLxHorJFXu";
+    const DEBUG_MODE = false;
+  </script>
+  <!-- ========== END CONFIG ========== -->
+
+  <div id="app" class="flex h-screen">
+    <div id="auth-screen" class="flex-1 flex items-center justify-center bg-discord-darkest p-4">
+      <div class="w-full max-w-md text-center">
+        <h1 class="text-4xl font-bold text-white mb-2">Mini-Discord</h1>
+        <p class="text-gray-400 mb-8">A Discord-like chat experience</p>
+        <div class="space-y-3">
+          <button id="btn-login" class="w-full py-3 px-4 bg-discord-blurple hover:bg-indigo-600 rounded font-medium transition">Login</button>
+          <button id="btn-signup" class="w-full py-3 px-4 bg-discord-dark hover:bg-discord-darker rounded font-medium transition">Create Account</button>
+          <button id="btn-join-invite" class="w-full py-3 px-4 bg-discord-dark hover:bg-discord-darker rounded font-medium transition">Join with Invite</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="main-app" class="hidden flex-1 flex h-screen overflow-hidden">
+      <aside id="server-sidebar" class="w-[72px] bg-discord-darkest flex flex-col items-center py-3 gap-2 flex-shrink-0 scrollbar-thin overflow-y-auto">
+        <button id="btn-add-server" class="w-12 h-12 rounded-2xl bg-discord-dark hover:bg-discord-green hover:text-discord-darkest flex items-center justify-center transition text-2xl font-light" title="Create Server">+</button>
+        <button id="btn-join-server" class="w-12 h-12 rounded-2xl bg-discord-dark hover:bg-discord-blurple flex items-center justify-center transition text-sm font-medium" title="Join Server">Join</button>
+        <div id="server-list" class="flex flex-col gap-2"></div>
+      </aside>
+
+      <aside id="channel-sidebar" class="w-60 bg-discord-darker flex flex-col flex-shrink-0 hidden md:flex">
+        <div class="h-12 px-4 flex items-center justify-between border-b border-discord-dark shadow-sm">
+          <div class="flex items-center gap-2 min-w-0">
+            <span id="current-server-name" class="font-semibold truncate">Select Server</span>
+            <button id="btn-admin-menu" class="flex-shrink-0 p-1 rounded text-gray-400 hover:text-white hover:bg-discord-dark hidden" title="Server Admin">⚙</button>
+          </div>
+          <div class="flex gap-2 flex-shrink-0">
+            <button id="btn-invite" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-discord-blurple text-gray-300 hover:text-white transition font-medium">Invite</button>
+            <button id="btn-leave-server" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-discord-red text-gray-300 hover:text-white transition font-medium">Leave</button>
+          </div>
+        </div>
+        <div class="flex-1 overflow-y-auto scrollbar-thin py-2">
+          <div class="px-2">
+            <button id="btn-add-channel" class="w-full text-left px-2 py-1.5 rounded text-gray-400 hover:bg-discord-dark hover:text-white flex items-center gap-2 text-sm">
+              <span>#</span> Text Channels
+            </button>
+            <div id="channel-list" class="mt-1"></div>
+          </div>
+        </div>
+        <div class="p-2 border-t border-discord-dark">
+          <div id="user-pill" class="flex items-center gap-3 px-2 py-2 rounded hover:bg-discord-dark cursor-pointer">
+            <div class="w-8 h-8 rounded-full bg-discord-blurple flex items-center justify-center overflow-hidden">
+              <img id="user-avatar" class="w-full h-full object-cover" src="" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+              <span id="user-initial" class="hidden">?</span>
+            </div>
+            <div class="flex-1 min-w-0 hidden md:block">
+              <div id="user-display-name" class="text-sm font-medium truncate">User</div>
+              <div id="user-status" class="text-xs text-gray-500">Online</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <button id="btn-toggle-channel" class="md:hidden fixed top-4 left-20 z-40 bg-discord-dark p-2 rounded">☰</button>
+
+      <main class="flex-1 flex flex-col min-w-0 bg-discord-dark">
+        <header class="h-12 px-4 flex items-center border-b border-discord-dark shadow-sm flex-shrink-0">
+          <span id="channel-header-name" class="font-semibold"># general</span>
+          <div class="ml-4 flex-1"></div>
+          <button id="btn-members-toggle" class="p-2 hover:bg-discord-darker rounded lg:hidden">👥</button>
+        </header>
+
+        <div id="messages-container" class="flex-1 overflow-y-auto scrollbar-thin p-4 flex flex-col-reverse">
+          <div id="messages-loading" class="flex justify-center py-8">
+            <div class="animate-spin w-8 h-8 border-2 border-discord-blurple border-t-transparent rounded-full"></div>
+          </div>
+          <div id="messages-list" class="space-y-4"></div>
+          <div id="load-more" class="hidden py-4 text-center">
+            <button id="btn-load-more" class="text-discord-blurple hover:underline text-sm">Load older messages</button>
+          </div>
+        </div>
+
+        <div id="typing-indicator" class="hidden px-4 py-2 text-sm text-gray-400">
+          <span id="typing-users"></span> <span class="typing-dot">.</span><span class="typing-dot">.</span><span class="typing-dot">.</span>
+        </div>
+
+        <div id="message-input-area" class="p-4 flex-shrink-0">
+          <div id="reply-preview" class="hidden mb-2 px-3 py-2 rounded-l border-l-4 border-discord-blurple bg-discord-darker/50 flex items-center justify-between">
+            <div class="min-w-0 flex-1">
+              <span class="text-xs text-discord-blurple font-medium">Replying to </span>
+              <span class="text-sm text-gray-300 truncate" id="reply-preview-name"></span>
+              <p class="text-xs text-gray-500 truncate mt-0.5" id="reply-preview-text"></p>
+            </div>
+            <button type="button" id="reply-cancel" class="text-gray-400 hover:text-white p-1 flex-shrink-0">✕</button>
+          </div>
+          <div class="flex items-end gap-2">
+            <div class="flex-1 flex items-center gap-2 bg-discord-darker rounded-lg px-4 py-2 min-h-[44px]">
+              <button id="btn-emoji" class="text-gray-400 hover:text-white p-1" title="Emoji">😀</button>
+              <button id="btn-gif" class="text-gray-400 hover:text-white p-1" title="GIF">GIF</button>
+              <input type="file" id="file-attach" accept="image/*" class="hidden">
+              <button id="btn-attach" class="text-gray-400 hover:text-white p-1 text-lg" title="Upload file">📁</button>
+              <input id="message-input" type="text" placeholder="Message #general" class="flex-1 bg-transparent outline-none text-sm py-1" maxlength="2000">
+              <div id="attachment-preview" class="hidden flex items-center gap-2 flex-wrap"></div>
+            </div>
+            <button id="btn-send" class="p-2 rounded-full bg-discord-blurple hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed transition">
+              <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            </button>
+          </div>
+        </div>
+      </main>
+
+      <aside id="members-sidebar" class="w-60 bg-discord-darker flex flex-col flex-shrink-0 hidden lg:flex">
+        <div class="h-12 px-4 flex items-center border-b border-discord-dark">
+          <span class="font-semibold text-sm">Members</span>
+        </div>
+        <div id="members-list" class="flex-1 overflow-y-auto scrollbar-thin p-2"></div>
+      </aside>
+    </div>
+  </div>
+
+  <div id="modal-backdrop" class="fixed inset-0 bg-black/50 z-50 hidden items-center justify-center p-4" style="display: none;">
+    <div id="modal-content" class="bg-discord-darker rounded-lg shadow-xl max-w-md w-full max-h-[90vh] overflow-y-auto modal-animate" onclick="event.stopPropagation()">
+      <div class="p-6">
+        <div class="flex items-center justify-between mb-4">
+          <h2 id="modal-title" class="text-xl font-semibold">Modal</h2>
+          <button id="modal-close" class="text-gray-400 hover:text-white p-1">✕</button>
+        </div>
+        <div id="modal-body"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container" class="fixed bottom-4 right-4 z-[100] flex flex-col gap-2"></div>
+
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+    import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
+    import { getFirestore, collection, doc, setDoc, getDoc, getDocs, addDoc, updateDoc, deleteDoc, query, where, orderBy, limit, startAfter, onSnapshot, serverTimestamp, increment } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+    import { getStorage, ref, uploadBytes, getDownloadURL } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js';
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const storage = getStorage(app);
+
+    let currentUser = null;
+    let currentServerId = null;
+    let currentChannelId = null;
+    let servers = {};
+    let channels = {};
+    let members = {};
+    let memberUserData = {};
+    let memberUserUnsubs = {};
+    let messages = {};
+    let typingUsers = {};
+    let userPresence = {};
+    let messageListeners = [];
+    let channelUnsub = null;
+    let unsubPresence = null;
+    let unsubMembers = null;
+    let unsubMyMemberships = null;
+    let serversLoadVersion = 0;
+    let membersLoadVersion = 0;
+    let presenceInterval = null;
+    let lastDoc = null;
+    const MESSAGE_LIMIT = 50;
+    const PRESENCE_HEARTBEAT_MS = 30000;
+    const PRESENCE_STALE_MS = 90000;
+    let pendingAttachments = [];
+    const PUBLIC_SERVER_ID = 'public';
+    let replyingTo = null;
+    let activeMemberProfileUserId = null;
+
+    const EMOJI_CATEGORIES = {
+      'Smileys': ['😀','😃','😄','😁','😆','😅','🤣','😂','🙂','🙃','😉','😊','😇','🥰','😍','🤩','😘','😗','☺','😚','😙','🥲','😋','😛','😜','🤪','😝','🤑','🤗','🤭','🤫','🤔','🤐','🤨','😐','😑','😶','😏','😒','🙄','😬','🤥','😌','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🤧','🥵','🥶','🥴','😵','🤯','🤠','🥳','🥸'],
+      'Gestures': ['👋','🤚','🖐','✋','🖖','👌','🤌','🤏','✌','🤞','🤟','🤘','🤙','👈','👉','👆','🖕','👇','☝','👍','👎','✊','👊','🤛','🤜','👏','🙌','👐','🤲','🤝','🙏','✍','💅','🤳','💪','🦾','🦿','🦵','🦶','👂','🦻','👃','🧠','🫀','🫁','🦷','🦴','👀','👁','👅','👄'],
+      'Hearts': ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💘','💝','💟','♥️'],
+      'Symbols': ['✖️','➕','➖','➗','♾️','💲','💱','™️','©️','®️','〰️','➰','➿','🔝','🔙','🔛','🔜','🔚','〽️','✳️','❇️','‼️','⁉️','❓','❔','❗','❕','🔅','🔆','⚠️','🚸','🔱','⚜️','🔰','♻️','✅','🈯','💹','❇️','✳️','❎','🌐','💠','Ⓜ️','🌀','💤','🏧','🚾','♿','🅿️','🛗','🈳','🈂️','🛂','🛃','🛄','🛅','🚹','🚺','🚼','⚧️','🚻','♻️','⛔','🚫','🚳','🚭','🚯','🚱','🚷','📵','🔞','☢️','☣️','⬆️','↗️','➡️','↘️','⬇️','↙️','⬅️','↖️','↕️','↔️','↩️','↪️','⤴️','⤵️','🔃','🔄','🔙','🔛','🔜','🔝']
+    };
+
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = 'bg-discord-darker border border-discord-dark px-4 py-3 rounded shadow-lg toast-enter flex items-center gap-2';
+      const colors = { success: 'text-discord-green', error: 'text-discord-red', info: 'text-gray-300' };
+      toast.innerHTML = `<span class="${colors[type] || colors.info}">${message}</span>`;
+      container.appendChild(toast);
+      setTimeout(() => toast.remove(), 3000);
+    }
+
+    function formatTime(timestamp) {
+      if (!timestamp) return '';
+      const d = timestamp?.toDate ? timestamp.toDate() : new Date(timestamp);
+      const now = new Date();
+      const diff = now - d;
+      if (diff < 60000) return 'Just now';
+      if (diff < 3600000) return `${Math.floor(diff/60000)}m ago`;
+      if (diff < 86400000) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      if (diff < 604800000) return d.toLocaleDateString([], { weekday: 'short' });
+      return d.toLocaleDateString();
+    }
+
+    function escapeHtml(text) {
+      if (!text) return '';
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function debounce(fn, ms) {
+      let t;
+      return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    }
+
+    function getUserDisplayName(userData, memberData) {
+      return (userData?.displayName || userData?.username || memberData?.displayName || memberData?.username || '').trim();
+    }
+
+    const modal = {
+      backdrop: document.getElementById('modal-backdrop'),
+      title: document.getElementById('modal-title'),
+      body: document.getElementById('modal-body'),
+      close: document.getElementById('modal-close'),
+      open(title, content) {
+        this.title.textContent = title;
+        this.body.innerHTML = content;
+        this.backdrop.classList.remove('hidden');
+        this.backdrop.style.display = 'flex';
+        document.body.style.overflow = 'hidden';
+      },
+      closeModal() {
+        this.backdrop.classList.add('hidden');
+        this.backdrop.style.display = 'none';
+        document.body.style.overflow = '';
+        activeMemberProfileUserId = null;
+      }
+    };
+    modal.close.onclick = () => modal.closeModal();
+    modal.backdrop.onclick = (e) => { if (e.target === modal.backdrop) modal.closeModal(); };
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') modal.closeModal(); });
+
+    async function signUp(email, password, displayName) {
+      try {
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        await setDoc(doc(db, 'users', cred.user.uid), {
+          displayName: displayName || email.split('@')[0],
+          bio: '',
+          photoURL: '',
+          createdAt: serverTimestamp(),
+          status: 'offline'
+        });
+        showToast('Account created!', 'success');
+        modal.closeModal();
+      } catch (e) { showToast(e.message || 'Signup failed', 'error'); }
+    }
+
+    async function logIn(email, password) {
+      try {
+        await signInWithEmailAndPassword(auth, email, password);
+        showToast('Logged in!', 'success');
+        modal.closeModal();
+      } catch (e) { showToast(e.message || 'Login failed', 'error'); }
+    }
+
+    async function logOut() {
+      try { await updatePresence('offline'); } catch (_) {}
+      stopPresenceHeartbeat();
+      await signOut(auth);
+      currentServerId = null;
+      currentChannelId = null;
+      document.getElementById('auth-screen').classList.remove('hidden');
+      document.getElementById('main-app').classList.add('hidden');
+    }
+
+    function renderLoginModal() {
+      modal.open('Login', `
+        <form id="login-form" class="space-y-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Email</label>
+            <input type="email" id="login-email" required class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Password</label>
+            <input type="password" id="login-password" required class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+          </div>
+          <button type="submit" class="w-full py-2 bg-discord-blurple hover:bg-indigo-600 rounded font-medium">Login</button>
+        </form>
+      `);
+      document.getElementById('login-form').onsubmit = (e) => {
+        e.preventDefault();
+        logIn(document.getElementById('login-email').value, document.getElementById('login-password').value);
+      };
+    }
+
+    function renderSignupModal() {
+      modal.open('Create Account', `
+        <form id="signup-form" class="space-y-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Display Name</label>
+            <input type="text" id="signup-display" placeholder="Your name" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Email</label>
+            <input type="email" id="signup-email" required class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Password</label>
+            <input type="password" id="signup-password" required minlength="6" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+          </div>
+          <button type="submit" class="w-full py-2 bg-discord-blurple hover:bg-indigo-600 rounded font-medium">Create Account</button>
+        </form>
+      `);
+      document.getElementById('signup-form').onsubmit = (e) => {
+        e.preventDefault();
+        signUp(document.getElementById('signup-email').value, document.getElementById('signup-password').value, document.getElementById('signup-display').value);
+      };
+    }
+
+    function renderProfileModal() {
+      modal.open('Edit Profile', `
+        <form id="profile-form" class="space-y-4">
+          <div class="flex items-center gap-4">
+            <div id="profile-avatar-preview" class="w-16 h-16 rounded-full bg-discord-blurple flex items-center justify-center overflow-hidden flex-shrink-0">
+              <img id="profile-avatar-img" class="w-full h-full object-cover" src="${currentUser?.photoURL || ''}" alt="" onerror="this.style.display='none'">
+              <span id="profile-avatar-initial" class="text-2xl font-bold">${(currentUser?.displayName || '?')[0].toUpperCase()}</span>
+            </div>
+            <div class="flex-1">
+              <label class="block text-sm text-gray-400 mb-1">Change Avatar</label>
+              <label for="profile-avatar-input" class="inline-block px-4 py-2 rounded bg-discord-blurple hover:bg-indigo-600 text-white text-sm font-medium cursor-pointer transition">Choose Photo</label>
+              <input type="file" id="profile-avatar-input" accept="image/*" class="hidden">
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Display Name</label>
+            <input type="text" id="profile-display" value="${escapeHtml(currentUser?.displayName || '')}" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">About Me</label>
+            <textarea id="profile-bio" rows="3" maxlength="200" placeholder="Say something about yourself" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple resize-none">${escapeHtml(currentUser?.bio || '')}</textarea>
+          </div>
+          <button type="submit" class="w-full py-2 bg-discord-blurple hover:bg-indigo-600 rounded font-medium">Save</button>
+        </form>
+      `);
+      const img = document.getElementById('profile-avatar-img');
+      const initialSpan = document.getElementById('profile-avatar-initial');
+      if (currentUser?.photoURL) { img.src = currentUser.photoURL; img.style.display = 'block'; initialSpan.style.display = 'none'; }
+      else { img.style.display = 'none'; initialSpan.style.display = 'flex'; }
+      document.getElementById('profile-avatar-input').onchange = async (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        try {
+          const r = ref(storage, `users/${currentUser.uid}/avatar`);
+          await uploadBytes(r, file);
+          const url = await getDownloadURL(r);
+          await updateDoc(doc(db, 'users', currentUser.uid), { photoURL: url });
+          currentUser.photoURL = url;
+          img.src = url; img.style.display = 'block'; document.getElementById('profile-avatar-initial').style.display = 'none';
+          showToast('Avatar updated!', 'success');
+        } catch (err) { showToast(err.message, 'error'); }
+      };
+      document.getElementById('profile-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const name = document.getElementById('profile-display').value.trim();
+        const bio = document.getElementById('profile-bio').value.trim();
+        if (!name) return;
+        try {
+          await updateDoc(doc(db, 'users', currentUser.uid), { displayName: name, bio });
+          currentUser.displayName = name;
+          currentUser.bio = bio;
+          updateUserPill();
+          showToast('Profile updated!', 'success');
+          modal.closeModal();
+        } catch (err) { showToast(err.message, 'error'); }
+      };
+    }
+
+    async function updatePresence(status = 'online') {
+      if (!currentUser?.uid) return;
+      await setDoc(doc(db, 'users', currentUser.uid), { status, lastSeen: serverTimestamp() }, { merge: true });
+    }
+
+    function startPresenceHeartbeat() {
+      if (presenceInterval) clearInterval(presenceInterval);
+      presenceInterval = setInterval(() => {
+        if (!currentUser?.uid) return;
+        updatePresence(document.hidden ? 'idle' : 'online').catch(() => {});
+      }, PRESENCE_HEARTBEAT_MS);
+    }
+
+    function stopPresenceHeartbeat() {
+      if (!presenceInterval) return;
+      clearInterval(presenceInterval);
+      presenceInterval = null;
+    }
+
+    function getEffectivePresenceStatus(userId) {
+      const status = userPresence[userId] || 'offline';
+      const lastSeen = memberUserData[userId]?.lastSeen;
+      const seenAt = lastSeen?.toDate ? lastSeen.toDate().getTime() : (lastSeen ? new Date(lastSeen).getTime() : 0);
+      if (!seenAt) return status;
+      if (Date.now() - seenAt > PRESENCE_STALE_MS) return 'offline';
+      return status;
+    }
+
+    function clearMemberUserListeners() {
+      Object.values(memberUserUnsubs).forEach(unsub => typeof unsub === 'function' && unsub());
+      memberUserUnsubs = {};
+    }
+
+    function subscribePresence(serverId) {
+      if (unsubPresence) unsubPresence();
+      if (!serverId) return;
+      const memberIds = Object.values(members).filter(m => m.serverId === serverId).map(m => m.userId);
+      if (memberIds.length === 0) return;
+      const batch = memberIds.slice(0, 10);
+      unsubPresence = onSnapshot(query(collection(db, 'users'), where('__name__', 'in', batch)), (snap) => {
+        snap.docs.forEach(d => { userPresence[d.id] = d.data().status || 'offline'; });
+        renderMembers();
+      });
+    }
+
+    async function createServer(name, iconFile) {
+      if (!currentUser?.uid) return;
+      try {
+        const serverRef = doc(collection(db, 'servers'));
+        let iconUrl = '';
+        if (iconFile) {
+          const r = ref(storage, `servers/${serverRef.id}/icon`);
+          await uploadBytes(r, iconFile);
+          iconUrl = await getDownloadURL(r);
+        }
+        await setDoc(serverRef, { name: name || 'New Server', ownerId: currentUser.uid, icon: iconUrl, createdAt: serverTimestamp() });
+        await setDoc(doc(db, 'servers', serverRef.id, 'members', currentUser.uid), { role: 'owner' });
+        const chRef = doc(collection(db, 'channels'));
+        await setDoc(chRef, { serverId: serverRef.id, name: 'general', createdAt: serverTimestamp() });
+        await setDoc(doc(collection(db, 'memberships')), { serverId: serverRef.id, userId: currentUser.uid, role: 'owner' });
+        showToast('Server created!', 'success');
+        modal.closeModal();
+        loadServers();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    function isAdmin(serverId) {
+      const sid = serverId || currentServerId;
+      if (!sid || !currentUser?.uid) return false;
+      const srv = servers[sid];
+      if (srv?.ownerId === 'system') return false;
+      if (srv?.ownerId === currentUser.uid) return true;
+      const mem = Object.values(members).find(m => m.serverId === sid && m.userId === currentUser.uid);
+      return mem?.role === 'admin';
+    }
+
+    async function joinServerByCode(code) {
+      if (!currentUser?.uid || !code) return;
+      const q = query(collection(db, 'invites'), where('code', '==', code.trim().toUpperCase()));
+      const snap = await getDocs(q);
+      const inv = snap.docs.find(d => {
+        const d_ = d.data();
+        if (d_.maxUses && d_.uses >= d_.maxUses) return false;
+        if (d_.expireAt?.toDate && d_.expireAt.toDate() < new Date()) return false;
+        return true;
+      });
+      if (!inv) { showToast('Invalid or expired invite', 'error'); return; }
+      const invData = inv.data();
+      const bannedSnap = await getDoc(doc(db, 'servers', invData.serverId, 'banned', currentUser.uid));
+      if (bannedSnap.exists()) { showToast('You are banned from this server', 'error'); return; }
+      const existing = await getDocs(query(collection(db, 'memberships'), where('serverId', '==', invData.serverId), where('userId', '==', currentUser.uid)));
+      if (!existing.empty) { showToast('Already a member', 'info'); selectServer(invData.serverId); modal.closeModal(); return; }
+      await setDoc(doc(db, 'servers', invData.serverId, 'members', currentUser.uid), { role: 'member' });
+      await setDoc(doc(collection(db, 'memberships')), { serverId: invData.serverId, userId: currentUser.uid, role: 'member' });
+      await updateDoc(doc(db, 'invites', inv.id), { uses: increment(1) });
+      showToast('Joined server!', 'success');
+      modal.closeModal();
+      await loadServers();
+      if (servers[invData.serverId]) selectServer(invData.serverId);
+      else showToast('Joined, but server details could not be loaded', 'error');
+    }
+
+    async function leaveServer() {
+      if (!currentServerId || !currentUser?.uid) {
+        showToast('Select a server first', 'error');
+        return;
+      }
+      if (currentServerId === PUBLIC_SERVER_ID) {
+        showToast('Cannot leave the public server', 'error');
+        return;
+      }
+      const mem = Object.values(members).find(m => m.serverId === currentServerId && m.userId === currentUser.uid);
+      if (!mem) return;
+      const srv = servers[currentServerId];
+      if (srv?.ownerId === currentUser.uid) { showToast('Transfer ownership before leaving', 'error'); return; }
+      await deleteDoc(doc(db, 'servers', currentServerId, 'members', currentUser.uid));
+      await deleteDoc(doc(db, 'memberships', mem.id));
+      showToast('Left server', 'info');
+      currentServerId = null; currentChannelId = null;
+      loadServers();
+      renderChannelList();
+      renderMessages();
+    }
+
+    function selectServer(serverId) {
+      currentServerId = serverId;
+      currentChannelId = null;
+      document.getElementById('current-server-name').textContent = servers[serverId]?.name || 'Server';
+      loadChannels(serverId);
+      loadMembers();
+      document.getElementById('messages-loading').classList.remove('hidden');
+      renderMessages();
+    }
+
+    async function ensurePublicServer() {
+      const publicRef = doc(db, 'servers', PUBLIC_SERVER_ID);
+      const publicSnap = await getDoc(publicRef);
+      if (!publicSnap.exists()) {
+        await setDoc(publicRef, { name: 'Public', ownerId: 'system', icon: '', createdAt: serverTimestamp() });
+        const chRef = doc(collection(db, 'channels'));
+        await setDoc(chRef, { serverId: PUBLIC_SERVER_ID, name: 'general', createdAt: serverTimestamp() });
+      }
+    }
+
+    async function ensurePublicMembership() {
+      const membershipsSnap = await getDocs(query(collection(db, 'memberships'), where('userId', '==', currentUser.uid)));
+      if (!membershipsSnap.empty) return;
+      await ensurePublicServer();
+      await setDoc(doc(db, 'servers', PUBLIC_SERVER_ID, 'members', currentUser.uid), { role: 'member' });
+      await setDoc(doc(collection(db, 'memberships')), { serverId: PUBLIC_SERVER_ID, userId: currentUser.uid, role: 'member' });
+    }
+
+    async function ensureUserPublicMembership(userId) {
+      if (!userId) return;
+      await ensurePublicServer();
+      const existingMembership = await getDocs(query(
+        collection(db, 'memberships'),
+        where('serverId', '==', PUBLIC_SERVER_ID),
+        where('userId', '==', userId)
+      ));
+      if (existingMembership.empty) {
+        await setDoc(doc(collection(db, 'memberships')), { serverId: PUBLIC_SERVER_ID, userId, role: 'member' });
+      }
+      const publicMemberRef = doc(db, 'servers', PUBLIC_SERVER_ID, 'members', userId);
+      const existingPublicMember = await getDoc(publicMemberRef);
+      if (!existingPublicMember.exists()) {
+        await setDoc(publicMemberRef, { role: 'member' });
+      }
+    }
+
+    async function loadServers() {
+      if (!currentUser?.uid) return;
+      await ensurePublicMembership();
+      if (unsubMyMemberships) { unsubMyMemberships(); unsubMyMemberships = null; }
+      const loadVersion = ++serversLoadVersion;
+      const q = query(collection(db, 'memberships'), where('userId', '==', currentUser.uid));
+      unsubMyMemberships = onSnapshot(q, async (snap) => {
+        if (loadVersion !== serversLoadVersion || !currentUser?.uid) return;
+        const nextMembers = {};
+        snap.docs.forEach(d => { nextMembers[d.id] = { id: d.id, ...d.data() }; });
+        const serverIds = [...new Set(snap.docs.map(d => d.data().serverId))];
+        const nextServers = {};
+        const serverDocs = await Promise.all(serverIds.map(sid => getDoc(doc(db, 'servers', sid))));
+        if (loadVersion !== serversLoadVersion || !currentUser?.uid) return;
+        serverDocs.forEach((sDoc, i) => {
+          if (sDoc.exists()) nextServers[serverIds[i]] = { id: serverIds[i], ...sDoc.data() };
+        });
+        servers = nextServers;
+        members = nextMembers;
+        renderServerList();
+        if (currentServerId && !servers[currentServerId]) {
+          currentServerId = null;
+          currentChannelId = null;
+          renderChannelList();
+          renderMessages();
+        }
+        if (!currentServerId && Object.keys(servers).length > 0) {
+          const first = servers[PUBLIC_SERVER_ID] ? PUBLIC_SERVER_ID : Object.keys(servers)[0];
+          selectServer(first);
+        }
+      }, (err) => {
+        if (loadVersion !== serversLoadVersion) return;
+        showToast(err.message || 'Failed to load servers', 'error');
+      });
+    }
+
+    function renderServerList() {
+      const el = document.getElementById('server-list');
+      el.innerHTML = '';
+      const sorted = Object.values(servers).sort((a, b) => (a.id === PUBLIC_SERVER_ID ? -1 : b.id === PUBLIC_SERVER_ID ? 1 : 0));
+      sorted.forEach(s => {
+        const btn = document.createElement('button');
+        btn.className = `w-12 h-12 rounded-2xl flex items-center justify-center overflow-hidden transition ${currentServerId === s.id ? 'rounded-xl bg-discord-blurple' : 'hover:bg-discord-blurple'}`;
+        btn.title = s.name;
+        if (s.icon) { btn.innerHTML = `<img src="${s.icon}" class="w-full h-full object-cover" alt="">`; }
+        else { btn.textContent = (s.name || 'S')[0].toUpperCase(); btn.classList.add('bg-discord-dark'); }
+        btn.onclick = () => selectServer(s.id);
+        el.appendChild(btn);
+      });
+    }
+
+    async function loadChannels(serverId) {
+      const sid = serverId || currentServerId;
+      if (!sid) return;
+      if (channelUnsub) { channelUnsub(); channelUnsub = null; }
+      const q = query(collection(db, 'channels'), where('serverId', '==', sid), orderBy('createdAt'));
+      channelUnsub = onSnapshot(q, (snap) => {
+        channels = {};
+        snap.docs.forEach(d => { channels[d.id] = { id: d.id, ...d.data() }; });
+        renderChannelList();
+        const chIds = Object.values(channels).filter(c => c.serverId === sid).map(c => c.id);
+        if (chIds.length && currentServerId === sid && !currentChannelId) {
+          selectChannel(chIds[0]);
+        } else if (chIds.length === 0 && currentServerId === sid) {
+          currentChannelId = null;
+          document.getElementById('messages-loading').classList.add('hidden');
+          renderMessages();
+        }
+      }, (err) => {
+        document.getElementById('messages-loading').classList.add('hidden');
+        showToast(err.message || 'Failed to load channels', 'error');
+      });
+    }
+
+    function renderChannelList() {
+      const el = document.getElementById('channel-list');
+      el.innerHTML = '';
+      Object.values(channels).filter(c => c.serverId === currentServerId).forEach(ch => {
+        const btn = document.createElement('button');
+        btn.className = `w-full text-left px-2 py-1.5 rounded flex items-center gap-2 text-sm ${currentChannelId === ch.id ? 'bg-discord-dark text-white' : 'text-gray-400 hover:bg-discord-dark hover:text-white'}`;
+        btn.innerHTML = `<span>#</span><span class="truncate">${escapeHtml(ch.name)}</span>`;
+        btn.onclick = () => selectChannel(ch.id);
+        el.appendChild(btn);
+      });
+    }
+
+    async function createChannel(name) {
+      if (!currentServerId || !currentUser?.uid) return;
+      if (!isAdmin()) { showToast('Admin only', 'error'); return; }
+      try {
+        const chRef = doc(collection(db, 'channels'));
+        await setDoc(chRef, { serverId: currentServerId, name: (name || 'new-channel').replace(/\s/g, '-').toLowerCase(), createdAt: serverTimestamp() });
+        showToast('Channel created!', 'success');
+        modal.closeModal();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function deleteChannel(channelId) {
+      if (!channelId) return;
+      const ch = channels[channelId];
+      if (!ch || ch.serverId !== currentServerId) return;
+      if (!isAdmin()) { showToast('Admin only', 'error'); return; }
+      try {
+        const msgs = await getDocs(query(collection(db, 'messages'), where('channelId', '==', channelId)));
+        for (const m of msgs.docs) await deleteDoc(doc(db, 'messages', m.id));
+        await deleteDoc(doc(db, 'channels', channelId));
+        showToast('Channel deleted', 'info');
+        if (currentChannelId === channelId) { currentChannelId = null; selectServer(currentServerId); }
+        modal.closeModal();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    function selectChannel(channelId) {
+      currentChannelId = channelId;
+      const ch = channels[channelId];
+      document.getElementById('channel-header-name').textContent = ch ? `# ${ch.name}` : '# general';
+      document.getElementById('message-input').placeholder = `Message #${ch?.name || 'general'}`;
+      document.getElementById('message-input-area').style.display = currentChannelId ? 'block' : 'none';
+      renderMessages();
+      subscribeMessages();
+      subscribeTyping();
+    }
+
+    function subscribeMessages() {
+      messageListeners.forEach(u => typeof u === 'function' && u());
+      messageListeners = messageListeners.filter(() => false);
+      if (!currentChannelId) return;
+      document.getElementById('messages-loading').classList.remove('hidden');
+      const q = query(
+        collection(db, 'messages'),
+        where('channelId', '==', currentChannelId),
+        orderBy('createdAt', 'desc'),
+        limit(MESSAGE_LIMIT)
+      );
+      const unsub = onSnapshot(q, (snap) => {
+        messages = {};
+        snap.docs.forEach(d => { messages[d.id] = { id: d.id, ...d.data() }; });
+        lastDoc = snap.docs[snap.docs.length - 1];
+        document.getElementById('load-more').classList.toggle('hidden', !lastDoc || snap.docs.length < MESSAGE_LIMIT);
+        renderMessages();
+        document.getElementById('messages-loading').classList.add('hidden');
+      }, (err) => {
+        document.getElementById('messages-loading').classList.add('hidden');
+        showToast(err.message || 'Failed to load messages', 'error');
+      });
+      messageListeners.push(unsub);
+    }
+
+    async function loadOlderMessages() {
+      if (!currentChannelId || !lastDoc) return;
+      const q = query(
+        collection(db, 'messages'),
+        where('channelId', '==', currentChannelId),
+        orderBy('createdAt', 'desc'),
+        startAfter(lastDoc),
+        limit(MESSAGE_LIMIT)
+      );
+      const snap = await getDocs(q);
+      snap.docs.forEach(d => { messages[d.id] = { id: d.id, ...d.data() }; });
+      lastDoc = snap.docs[snap.docs.length - 1];
+      document.getElementById('load-more').classList.toggle('hidden', !lastDoc || snap.docs.length < MESSAGE_LIMIT);
+      renderMessages();
+    }
+
+    function renderMessages() {
+      const list = document.getElementById('messages-list');
+      const loadingEl = document.getElementById('messages-loading');
+      list.innerHTML = '';
+      if (!currentChannelId) {
+        loadingEl.classList.add('hidden');
+        list.innerHTML = '<div class="text-center text-gray-500 py-12">Select a channel</div>';
+        return;
+      }
+      const arr = Object.values(messages).filter(m => m.channelId === currentChannelId).sort((a, b) => (a.createdAt?.toDate?.() || 0) - (b.createdAt?.toDate?.() || 0));
+      let prevUserId = null;
+      arr.forEach((m) => {
+        const liveUser = memberUserData[m.userId] || {};
+        const displayName = getUserDisplayName(liveUser, m) || 'Unknown';
+        const avatarUrl = (liveUser.photoURL || m.photoURL || '').trim();
+        const isOwn = m.userId === currentUser?.uid;
+        const showAvatar = prevUserId !== m.userId || isOwn;
+        prevUserId = m.userId;
+        const div = document.createElement('div');
+        div.className = `message-group group flex gap-4 px-4 py-1 pl-1 ${isOwn ? 'flex-row-reverse justify-end' : ''}`;
+        const avatar = showAvatar ? `<div class="w-10 h-10 rounded-full bg-discord-blurple flex-shrink-0 flex items-center justify-center overflow-hidden">
+          ${avatarUrl
+            ? `<img src="${escapeHtml(avatarUrl)}" class="w-full h-full object-cover" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><span class="hidden text-sm font-bold">${displayName[0].toUpperCase()}</span>`
+            : `<span class="text-sm font-bold">${displayName[0].toUpperCase()}</span>`
+          }
+        </div>` : '<div class="w-10 flex-shrink-0"></div>';
+        const time = formatTime(m.createdAt);
+        const edited = m.editedAt ? ' <span class="text-xs text-gray-500">(edited)</span>' : '';
+        let content = escapeHtml(m.text || '');
+        (m.attachments || []).forEach((att) => {
+          if (att.url && (att.type === 'image' || /\.(gif|png|jpg|jpeg|webp)$/i.test(att.url))) {
+            content += `<div class="mt-2"><img src="${escapeHtml(att.url)}" class="max-w-sm max-h-64 rounded cursor-pointer" alt="attachment" onclick="window.open('${escapeHtml(att.url)}')"></div>`;
+          } else if (att.url) {
+            content += `<div class="mt-2"><a href="${escapeHtml(att.url)}" target="_blank" class="text-discord-blurple hover:underline">Attachment</a></div>`;
+          }
+        });
+        const adminDelBtn = isAdmin() ? `<button type="button" class="opacity-0 group-hover:opacity-100 ml-1 text-xs text-discord-red hover:underline transition" data-delete-msg="${m.id}" title="Delete message">Delete</button>` : '';
+        const replyBtn = `<button type="button" class="opacity-0 group-hover:opacity-100 ml-1 text-xs text-discord-blurple hover:underline transition" data-reply-msg="${m.id}" title="Reply">Reply</button>`;
+        const replyPreview = m.replyTo ? `<div class="mb-1 py-1 px-2 rounded border-l-2 border-discord-blurple/50 bg-discord-darkest/50 text-xs"><span class="text-discord-blurple">${escapeHtml(m.replyTo.displayName || 'Unknown')}</span><span class="text-gray-500">: </span><span class="text-gray-400 truncate">${escapeHtml((m.replyTo.text || '').slice(0, 80))}${(m.replyTo.text || '').length > 80 ? '...' : ''}</span></div>` : '';
+        const msgContent = `<div class="flex-1 min-w-0 max-w-[75%] ${isOwn ? 'text-right' : ''}"><div class="flex items-baseline gap-2 flex-wrap ${isOwn ? 'justify-end' : ''}"><span class="font-semibold text-white">${escapeHtml(displayName)}</span><span class="text-xs text-gray-500">${time}</span>${edited}${replyBtn}${adminDelBtn}</div>${replyPreview}<div class="text-gray-300 break-words ${isOwn ? 'bg-discord-blurple/30 rounded-lg px-3 py-2 inline-block' : ''}">${content}</div></div>`;
+        div.innerHTML = `${avatar}${msgContent}`;
+        list.appendChild(div);
+        const delBtn = div.querySelector('[data-delete-msg]');
+        if (delBtn) delBtn.onclick = () => { if (confirm('Delete this message?')) deleteAnyMessage(m.id); };
+        const replyBtnEl = div.querySelector('[data-reply-msg]');
+        if (replyBtnEl) replyBtnEl.onclick = () => {
+          replyingTo = { id: m.id, userId: m.userId, displayName, text: (m.text || '').slice(0, 100) };
+          document.getElementById('reply-preview').classList.remove('hidden');
+          document.getElementById('reply-preview-name').textContent = replyingTo.displayName;
+          document.getElementById('reply-preview-text').textContent = replyingTo.text || '(attachment)';
+          document.getElementById('message-input').focus();
+        };
+      });
+      list.scrollTop = list.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const input = document.getElementById('message-input');
+      const text = input.value.trim();
+      if (!currentChannelId || !currentUser?.uid) {
+        showToast('Select a channel first', 'error');
+        return;
+      }
+      if (!text && pendingAttachments.length === 0) return;
+      try {
+        const msg = {
+          serverId: currentServerId,
+          channelId: currentChannelId,
+          userId: currentUser.uid,
+          displayName: currentUser.displayName || 'User',
+          photoURL: currentUser.photoURL || '',
+          text: text || '',
+          attachments: [...pendingAttachments],
+          replyTo: replyingTo ? { messageId: replyingTo.id, userId: replyingTo.userId, displayName: replyingTo.displayName, text: replyingTo.text } : null,
+          createdAt: serverTimestamp()
+        };
+        await addDoc(collection(db, 'messages'), msg);
+        input.value = '';
+        pendingAttachments = [];
+        replyingTo = null;
+        document.getElementById('reply-preview').classList.add('hidden');
+        document.getElementById('attachment-preview').classList.add('hidden');
+        document.getElementById('attachment-preview').innerHTML = '';
+        updateTyping(false);
+      } catch (e) {
+        showToast(e.message || 'Failed to send message', 'error');
+        console.error('Send error:', e);
+      }
+    }
+
+    let typingTimeout;
+    async function updateTyping(typing) {
+      if (!currentChannelId || !currentUser?.uid) return;
+      try {
+        const refPath = doc(db, 'channels', currentChannelId, 'typing', currentUser.uid);
+        if (typing) {
+          await setDoc(refPath, { userId: currentUser.uid, displayName: currentUser.displayName, at: serverTimestamp() });
+          clearTimeout(typingTimeout);
+          typingTimeout = setTimeout(() => updateTyping(false), 5000);
+        } else {
+          await deleteDoc(refPath);
+        }
+      } catch (_) {}
+    }
+
+    function subscribeTyping() {
+      if (!currentChannelId) return;
+      const unsub = onSnapshot(collection(db, 'channels', currentChannelId, 'typing'), (snap) => {
+        typingUsers = {};
+        snap.docs.forEach(d => {
+          const d_ = d.data();
+          if (d_.userId !== currentUser?.uid) typingUsers[d_.userId] = d_.displayName;
+        });
+        const names = Object.values(typingUsers);
+        const el = document.getElementById('typing-indicator');
+        el.classList.toggle('hidden', names.length === 0);
+        document.getElementById('typing-users').textContent = names.length ? `${names.slice(0, 2).join(', ')}${names.length > 2 ? ' and others' : ''} typing` : '';
+      });
+      messageListeners.push(unsub);
+    }
+
+    async function createInvite() {
+      if (!currentServerId || !currentUser?.uid) {
+        showToast('Select a server first', 'error');
+        return;
+      }
+      const code = Math.random().toString(36).slice(2, 10).toUpperCase();
+      try {
+        await addDoc(collection(db, 'invites'), {
+          serverId: currentServerId,
+          code,
+          createdBy: currentUser.uid,
+          uses: 0,
+          maxUses: null,
+          expireAt: null
+        });
+        modal.open('Invite Link', `
+          <p class="text-gray-300 mb-4">Share this code to invite people:</p>
+          <p class="text-2xl font-mono bg-discord-dark p-4 rounded text-center">${code}</p>
+          <p class="text-sm text-gray-500 mt-2">Or share: ${window.location.origin}${window.location.pathname}?invite=${code}</p>
+        `);
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    function renderJoinModal() {
+      const needLogin = !currentUser?.uid;
+      modal.open('Join Server', `
+        ${needLogin ? '<p class="text-amber-400 text-sm mb-4">Log in or create an account first to join a server.</p>' : ''}
+        <form id="join-form" class="space-y-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Invite Code</label>
+            <input type="text" id="invite-code" placeholder="e.g. ABC123XY" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple uppercase">
+          </div>
+          <button type="submit" class="w-full py-2 bg-discord-blurple hover:bg-indigo-600 rounded font-medium">Join</button>
+          ${needLogin ? '<button type="button" id="join-login-btn" class="w-full py-2 bg-discord-dark hover:bg-discord-darker rounded font-medium mt-2">Log In</button>' : ''}
+        </form>
+      `);
+      document.getElementById('join-form').onsubmit = (e) => {
+        e.preventDefault();
+        if (needLogin) { showToast('Please log in first', 'error'); modal.closeModal(); renderLoginModal(); return; }
+        joinServerByCode(document.getElementById('invite-code').value);
+      };
+      const params = new URLSearchParams(location.search);
+      const invite = params.get('invite');
+      if (invite) document.getElementById('invite-code').value = invite;
+      const loginBtn = document.getElementById('join-login-btn');
+      if (loginBtn) loginBtn.onclick = () => { modal.closeModal(); renderLoginModal(); };
+    }
+
+    async function banUser(userId) {
+      if (!currentServerId || !isAdmin()) return;
+      const srv = servers[currentServerId];
+      if (srv?.ownerId === userId) { showToast('Cannot ban server owner', 'error'); return; }
+      const mem = Object.values(members).find(m => m.serverId === currentServerId && m.userId === userId);
+      if (!mem) return;
+      try {
+        await setDoc(doc(db, 'servers', currentServerId, 'banned', userId), { bannedBy: currentUser.uid, bannedAt: serverTimestamp() });
+        await deleteDoc(doc(db, 'servers', currentServerId, 'members', userId));
+        await deleteDoc(doc(db, 'memberships', mem.id));
+        showToast('User banned', 'success');
+        loadMembers();
+        modal.closeModal();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function kickUser(userId) {
+      if (!currentServerId || !isAdmin()) return;
+      const srv = servers[currentServerId];
+      if (srv?.ownerId === userId) { showToast('Cannot kick server owner', 'error'); return; }
+      const mem = Object.values(members).find(m => m.serverId === currentServerId && m.userId === userId);
+      if (!mem) return;
+      try {
+        await deleteDoc(doc(db, 'servers', currentServerId, 'members', mem.userId));
+        await deleteDoc(doc(db, 'memberships', mem.id));
+        await ensureUserPublicMembership(userId);
+        showToast('User kicked', 'success');
+        loadMembers();
+        modal.closeModal();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function makeAdmin(userId) {
+      if (!currentServerId || !currentUser?.uid) return;
+      const srv = servers[currentServerId];
+      if (srv?.ownerId !== currentUser.uid) { showToast('Only owner can make admins', 'error'); return; }
+      const mem = Object.values(members).find(m => m.serverId === currentServerId && m.userId === userId);
+      if (!mem) return;
+      try {
+        await updateDoc(doc(db, 'memberships', mem.id), { role: 'admin' });
+        await setDoc(doc(db, 'servers', currentServerId, 'members', userId), { role: 'admin' }, { merge: true });
+        members[mem.id].role = 'admin';
+        showToast('User is now admin', 'success');
+        loadMembers();
+        renderAdminModal();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function removeAdmin(userId) {
+      if (!currentServerId || !currentUser?.uid) return;
+      const srv = servers[currentServerId];
+      if (srv?.ownerId !== currentUser.uid) { showToast('Only owner can remove admins', 'error'); return; }
+      const mem = Object.values(members).find(m => m.serverId === currentServerId && m.userId === userId);
+      if (!mem) return;
+      try {
+        await updateDoc(doc(db, 'memberships', mem.id), { role: 'member' });
+        await setDoc(doc(db, 'servers', currentServerId, 'members', userId), { role: 'member' }, { merge: true });
+        members[mem.id].role = 'member';
+        showToast('Admin removed', 'success');
+        loadMembers();
+        renderAdminModal();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function deleteAnyMessage(msgId) {
+      if (!isAdmin()) return;
+      try {
+        await deleteDoc(doc(db, 'messages', msgId));
+        showToast('Message deleted', 'success');
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    function renderAdminModal() {
+      if (!isAdmin()) return;
+      const srv = servers[currentServerId];
+      const isOwner = srv?.ownerId === currentUser?.uid;
+      const memberRows = Object.values(members).filter(m => m.serverId === currentServerId).map(m => {
+        const ud = memberUserData[m.userId] || {};
+        const displayName = getUserDisplayName(ud, m) || 'Unknown';
+        const isOwnerMember = m.userId === srv?.ownerId;
+        const canMod = !isOwnerMember && (isOwner || (m.role !== 'owner' && m.role !== 'admin'));
+        const roleLabel = isOwnerMember ? 'Owner' : m.role === 'admin' ? 'Admin' : 'Member';
+        return `
+          <div class="flex items-center justify-between py-2 border-b border-discord-dark">
+            <div class="flex items-center gap-2">
+              <div class="w-8 h-8 rounded-full bg-discord-blurple flex items-center justify-center overflow-hidden">
+                <img src="${ud.photoURL || ''}" class="w-full h-full object-cover" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+                <span class="hidden text-xs font-bold">${displayName[0].toUpperCase()}</span>
+              </div>
+              <div>
+                <span class="font-medium">${escapeHtml(displayName)}</span>
+                <span class="text-xs text-gray-500 ml-2">${roleLabel}</span>
+              </div>
+            </div>
+            ${canMod ? `
+              <div class="flex gap-1">
+                ${isOwner && m.role !== 'admin' ? `<button type="button" class="text-xs px-2 py-1 rounded bg-discord-blurple hover:bg-indigo-600" data-make-admin="${m.userId}">Make Admin</button>` : ''}
+                ${isOwner && m.role === 'admin' ? `<button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-discord-red" data-remove-admin="${m.userId}">Remove Admin</button>` : ''}
+                <button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-amber-600" data-kick="${m.userId}">Kick</button>
+                <button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-discord-red" data-ban="${m.userId}">Ban</button>
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }).join('');
+      const channelRows = Object.values(channels).filter(c => c.serverId === currentServerId).map(ch => `
+        <div class="flex items-center justify-between py-2 border-b border-discord-dark">
+          <span class="text-gray-300"># ${escapeHtml(ch.name)}</span>
+          <button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-discord-red" data-delete-channel="${ch.id}">Delete</button>
+        </div>
+      `).join('');
+      modal.open('Server Admin', `
+        <div class="space-y-6">
+          <div>
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">Manage Members</h3>
+            <div class="max-h-48 overflow-y-auto space-y-0">${memberRows || '<p class="text-gray-500 py-2">No members</p>'}</div>
+          </div>
+          <div>
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">Channels</h3>
+            <div class="space-y-0">${channelRows || '<p class="text-gray-500 py-2">No channels</p>'}</div>
+            <button type="button" id="admin-create-channel" class="mt-2 text-sm px-3 py-1.5 rounded bg-discord-blurple hover:bg-indigo-600">+ Create Channel</button>
+          </div>
+        </div>
+      `);
+      document.querySelectorAll('[data-ban]').forEach(btn => btn.onclick = () => banUser(btn.dataset.ban));
+      document.querySelectorAll('[data-kick]').forEach(btn => btn.onclick = () => kickUser(btn.dataset.kick));
+      document.querySelectorAll('[data-make-admin]').forEach(btn => btn.onclick = () => makeAdmin(btn.dataset.makeAdmin));
+      document.querySelectorAll('[data-remove-admin]').forEach(btn => btn.onclick = () => removeAdmin(btn.dataset.removeAdmin));
+      document.querySelectorAll('[data-delete-channel]').forEach(btn => btn.onclick = () => {
+        if (confirm('Delete this channel?')) deleteChannel(btn.dataset.deleteChannel);
+      });
+      document.getElementById('admin-create-channel').onclick = () => { modal.closeModal(); renderCreateChannelModal(); };
+    }
+
+    function updateAdminButtonVisibility() {
+      const btn = document.getElementById('btn-admin-menu');
+      if (!btn) return;
+      if (isAdmin()) { btn.classList.remove('hidden'); btn.onclick = renderAdminModal; }
+      else { btn.classList.add('hidden'); }
+    }
+
+    async function loadMembers() {
+      if (!currentServerId) return;
+      const serverId = currentServerId;
+      const loadVersion = ++membersLoadVersion;
+      if (unsubMembers) { unsubMembers(); unsubMembers = null; }
+      clearMemberUserListeners();
+      members = {};
+      memberUserData = {};
+      userPresence = {};
+      renderMembers();
+      updateAdminButtonVisibility();
+      const q = query(collection(db, 'memberships'), where('serverId', '==', serverId));
+      unsubMembers = onSnapshot(q, (snap) => {
+        if (loadVersion !== membersLoadVersion || serverId !== currentServerId) return;
+        const nextMembers = {};
+        snap.docs.forEach(d => { nextMembers[d.id] = { id: d.id, ...d.data() }; });
+        members = nextMembers;
+        const userIds = [...new Set(Object.values(nextMembers).map(m => m.userId))];
+        const userIdSet = new Set(userIds);
+        Object.keys(memberUserUnsubs).forEach((uid) => {
+          if (!userIdSet.has(uid)) {
+            memberUserUnsubs[uid]();
+            delete memberUserUnsubs[uid];
+            delete memberUserData[uid];
+            delete userPresence[uid];
+          }
+        });
+        userIds.forEach((uid) => {
+          if (memberUserUnsubs[uid]) return;
+          memberUserUnsubs[uid] = onSnapshot(doc(db, 'users', uid), (u) => {
+            if (loadVersion !== membersLoadVersion || serverId !== currentServerId) return;
+            if (u.exists()) {
+              const data = u.data();
+              memberUserData[uid] = data;
+              userPresence[uid] = data.status || 'offline';
+            } else {
+              delete memberUserData[uid];
+              delete userPresence[uid];
+            }
+            renderMembers();
+            renderMessages();
+            if (activeMemberProfileUserId === uid) renderMemberProfileModal(uid);
+            updateAdminButtonVisibility();
+          });
+        });
+        renderMembers();
+        updateAdminButtonVisibility();
+      }, (err) => {
+        if (loadVersion !== membersLoadVersion || serverId !== currentServerId) return;
+        showToast(err.message || 'Failed to load members', 'error');
+      });
+    }
+
+    function renderMemberProfileModal(userId) {
+      activeMemberProfileUserId = userId;
+      const memberData = memberUserData[userId] || {};
+      const memberRole = Object.values(members).find(m => m.serverId === currentServerId && m.userId === userId);
+      const name = getUserDisplayName(memberData, memberRole) || 'Unknown';
+      const bio = (memberData?.bio || '').trim();
+      const role = servers[currentServerId]?.ownerId === userId ? 'Owner' : memberRole?.role === 'admin' ? 'Admin' : 'Member';
+      modal.open('Member Profile', `
+        <div class="space-y-4">
+          <div class="flex items-center gap-3">
+            <div class="w-14 h-14 rounded-full bg-discord-blurple flex items-center justify-center overflow-hidden">
+              <img src="${memberData.photoURL || ''}" class="w-full h-full object-cover" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+              <span class="hidden text-lg font-bold">${name[0].toUpperCase()}</span>
+            </div>
+            <div>
+              <div class="text-lg font-semibold text-white">${escapeHtml(name)}</div>
+              <div class="text-xs text-gray-500">${role}</div>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs uppercase tracking-wide text-gray-500 mb-1">About</div>
+            <div class="text-sm text-gray-300 bg-discord-dark rounded p-3">${escapeHtml(bio || 'No description set.')}</div>
+          </div>
+        </div>
+      `);
+    }
+
+    function renderMembers() {
+      const el = document.getElementById('members-list');
+      el.innerHTML = '';
+      const srv = servers[currentServerId];
+      Object.values(members)
+        .filter(m => m.serverId === currentServerId && m.userId !== currentUser?.uid)
+        .forEach(m => {
+          const ud = memberUserData[m.userId] || {};
+          const status = getEffectivePresenceStatus(m.userId);
+          const displayName = getUserDisplayName(ud, m) || 'Unknown';
+          const roleLabel = srv?.ownerId === m.userId ? ' (Owner)' : m.role === 'admin' ? ' (Admin)' : '';
+          const div = document.createElement('div');
+          div.className = 'flex items-center gap-2 px-2 py-1.5 rounded hover:bg-discord-dark cursor-pointer';
+          div.innerHTML = `
+            <div class="relative">
+              <div class="w-8 h-8 rounded-full bg-discord-blurple flex items-center justify-center overflow-hidden">
+                <img src="${ud.photoURL || ''}" class="w-full h-full object-cover" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+                <span class="hidden text-xs font-bold">${(displayName || '?')[0].toUpperCase()}</span>
+              </div>
+              <span class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-discord-darker ${status === 'online' ? 'bg-discord-green' : status === 'idle' ? 'bg-discord-yellow' : 'bg-gray-500'}"></span>
+            </div>
+            <span class="text-sm truncate">${escapeHtml(displayName)}<span class="text-gray-500 text-xs">${roleLabel}</span></span>
+          `;
+          div.onclick = () => renderMemberProfileModal(m.userId);
+          el.appendChild(div);
+        });
+    }
+
+    // ========== GIPHY API (replaces Tenor) ==========
+    async function fetchGiphyGifs(term = '', limit = 24) {
+      const url = term
+        ? `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_API_KEY}&q=${encodeURIComponent(term)}&limit=${limit}&rating=g`
+        : `https://api.giphy.com/v1/gifs/trending?api_key=${GIPHY_API_KEY}&limit=${limit}&rating=g`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.meta?.status !== 200) throw new Error(data.meta?.msg || 'Giphy API error');
+      return (data.data || []).map(g => ({
+        id: g.id,
+        url: g.images?.original?.url || g.images?.fixed_height?.url || '',
+        preview: g.images?.fixed_height_small?.url || g.images?.fixed_height?.url || g.images?.original?.url || ''
+      })).filter(x => x.url);
+    }
+
+    const debouncedGifSearch = debounce(async (term) => {
+      const container = document.getElementById('gif-results');
+      container.innerHTML = '<div class="flex justify-center py-8"><div class="animate-spin w-8 h-8 border-2 border-discord-blurple border-t-transparent rounded-full"></div></div>';
+      try {
+        const gifs = await fetchGiphyGifs(term, 24);
+        container.innerHTML = '';
+        const grid = document.createElement('div');
+        grid.className = 'gif-grid max-h-64 overflow-y-auto';
+        gifs.forEach(g => {
+          const img = document.createElement('img');
+          img.src = g.preview;
+          img.className = 'w-full h-20 object-cover rounded cursor-pointer hover:opacity-80';
+          img.onclick = () => selectGif(g);
+          grid.appendChild(img);
+        });
+        container.appendChild(grid);
+      } catch (e) {
+        container.innerHTML = '<p class="text-discord-red text-sm">Failed to load GIFs. Check Giphy API key.</p>';
+      }
+    }, 300);
+
+    function selectGif(gif) {
+      pendingAttachments.push({ type: 'image', url: gif.url });
+      const prev = document.getElementById('attachment-preview');
+      prev.classList.remove('hidden');
+      const wrap = document.createElement('div');
+      wrap.className = 'flex items-center gap-1';
+      wrap.innerHTML = `<img src="${gif.url}" class="w-12 h-12 object-cover rounded" alt=""><button type="button" class="text-discord-red text-xs" data-remove>✕</button>`;
+      wrap.querySelector('[data-remove]').onclick = () => {
+        pendingAttachments = pendingAttachments.filter(a => a.url !== gif.url);
+        wrap.remove();
+        if (pendingAttachments.length === 0) prev.classList.add('hidden');
+      };
+      prev.appendChild(wrap);
+      modal.closeModal();
+    }
+
+    function renderGifModal() {
+      modal.open('Search GIFs (Giphy)', `
+        <div class="space-y-4">
+          <input type="text" id="gif-search" placeholder="Search GIFs..." class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+          <div id="gif-results" class="min-h-[200px]"></div>
+        </div>
+      `);
+      document.getElementById('gif-search').oninput = (e) => debouncedGifSearch(e.target.value);
+      debouncedGifSearch('');
+    }
+
+    function renderEmojiModal() {
+      let html = '<div class="space-y-4"><input type="text" id="emoji-search" placeholder="Search emoji..." class="w-full bg-discord-dark border rounded px-3 py-2 outline-none"><div id="emoji-categories" class="max-h-48 overflow-y-auto scrollbar-thin">';
+      Object.entries(EMOJI_CATEGORIES).forEach(([cat, emojis]) => {
+        html += `<div class="mb-2"><div class="text-xs text-gray-500 mb-1">${cat}</div><div class="flex flex-wrap gap-1">`;
+        emojis.forEach(e => { html += `<button type="button" class="text-2xl hover:bg-discord-dark rounded p-1 emoji-btn" data-emoji="${e}">${e}</button>`; });
+        html += '</div></div>';
+      });
+      html += '</div></div>';
+      modal.open('Pick Emoji', html);
+      document.querySelectorAll('.emoji-btn').forEach(btn => {
+        btn.onclick = () => {
+          const inp = document.getElementById('message-input');
+          inp.value += btn.dataset.emoji;
+          inp.focus();
+          modal.closeModal();
+        };
+      });
+      document.getElementById('emoji-search').oninput = (e) => {
+        const v = e.target.value.toLowerCase();
+        document.querySelectorAll('.emoji-btn').forEach(b => {
+          b.style.display = !v || b.dataset.emoji.includes(v) ? '' : 'none';
+        });
+      };
+    }
+
+    function renderCreateServerModal() {
+      modal.open('Create Server', `
+        <form id="create-server-form" class="space-y-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Server Name</label>
+            <input type="text" id="server-name" placeholder="My Server" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Server Icon (optional)</label>
+            <label for="server-icon" class="inline-block px-4 py-2 rounded bg-discord-dark hover:bg-discord-blurple text-gray-300 hover:text-white text-sm font-medium cursor-pointer transition border border-discord-darkest">Choose Image</label>
+            <input type="file" id="server-icon" accept="image/*" class="hidden">
+          </div>
+          <button type="submit" class="w-full py-2 bg-discord-blurple hover:bg-indigo-600 rounded font-medium">Create</button>
+        </form>
+      `);
+      document.getElementById('create-server-form').onsubmit = (e) => {
+        e.preventDefault();
+        createServer(document.getElementById('server-name').value, document.getElementById('server-icon').files?.[0]);
+      };
+    }
+
+    function renderCreateChannelModal() {
+      modal.open('Create Channel', `
+        <form id="create-channel-form" class="space-y-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Channel Name</label>
+            <input type="text" id="channel-name" placeholder="new-channel" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+          </div>
+          <button type="submit" class="w-full py-2 bg-discord-blurple hover:bg-indigo-600 rounded font-medium">Create</button>
+        </form>
+      `);
+      document.getElementById('create-channel-form').onsubmit = (e) => {
+        e.preventDefault();
+        createChannel(document.getElementById('channel-name').value.replace(/\s/g, '-').toLowerCase() || 'new-channel');
+      };
+    }
+
+    function updateUserPill() {
+      const name = currentUser?.displayName || 'User';
+      document.getElementById('user-display-name').textContent = name;
+      document.getElementById('user-initial').textContent = name[0].toUpperCase();
+      const img = document.getElementById('user-avatar');
+      if (currentUser?.photoURL) { img.src = currentUser.photoURL; img.style.display = 'block'; document.getElementById('user-initial').style.display = 'none'; }
+      else { img.style.display = 'none'; document.getElementById('user-initial').style.display = 'flex'; }
+    }
+
+    document.getElementById('user-pill').onclick = () => renderProfileModal();
+
+    document.getElementById('btn-login').onclick = renderLoginModal;
+    document.getElementById('btn-signup').onclick = renderSignupModal;
+    document.getElementById('btn-join-invite').onclick = renderJoinModal;
+    document.getElementById('btn-join-server').onclick = renderJoinModal;
+    document.getElementById('btn-add-server').onclick = renderCreateServerModal;
+    document.getElementById('btn-invite').onclick = createInvite;
+    document.getElementById('btn-leave-server').onclick = leaveServer;
+    document.getElementById('btn-add-channel').onclick = renderCreateChannelModal;
+    document.getElementById('btn-emoji').onclick = renderEmojiModal;
+    document.getElementById('btn-gif').onclick = renderGifModal;
+    document.getElementById('btn-send').onclick = sendMessage;
+    document.getElementById('btn-load-more').onclick = loadOlderMessages;
+    document.getElementById('btn-members-toggle').onclick = () => document.getElementById('members-sidebar').classList.toggle('hidden');
+    document.getElementById('btn-toggle-channel').onclick = () => document.getElementById('channel-sidebar').classList.toggle('hidden');
+    document.addEventListener('visibilitychange', () => {
+      if (!currentUser?.uid) return;
+      updatePresence(document.hidden ? 'idle' : 'online').catch(() => {});
+    });
+    window.addEventListener('pagehide', () => {
+      if (!currentUser?.uid) return;
+      updatePresence('offline').catch(() => {});
+    });
+
+    document.getElementById('message-input').onkeydown = (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+      if (e.key === 'Escape') { replyingTo = null; document.getElementById('reply-preview').classList.add('hidden'); }
+    };
+    document.getElementById('reply-cancel').onclick = () => {
+      replyingTo = null;
+      document.getElementById('reply-preview').classList.add('hidden');
+    };
+    document.getElementById('message-input').oninput = () => updateTyping(true);
+
+    document.getElementById('btn-attach').onclick = () => document.getElementById('file-attach').click();
+    document.getElementById('file-attach').onchange = async (e) => {
+      const file = e.target.files?.[0];
+      if (!file || !file.type.startsWith('image/')) return;
+      try {
+        const r = ref(storage, `messages/${currentUser.uid}/${Date.now()}_${file.name}`);
+        await uploadBytes(r, file);
+        const url = await getDownloadURL(r);
+        pendingAttachments.push({ type: 'image', url });
+        const prev = document.getElementById('attachment-preview');
+        prev.classList.remove('hidden');
+        const wrap = document.createElement('div');
+        wrap.className = 'flex items-center gap-1';
+        wrap.innerHTML = `<img src="${url}" class="w-12 h-12 object-cover rounded" alt=""><button type="button" class="text-discord-red text-xs" data-remove>✕</button>`;
+        wrap.querySelector('[data-remove]').onclick = () => {
+          pendingAttachments = pendingAttachments.filter(a => a.url !== url);
+          wrap.remove();
+          if (pendingAttachments.length === 0) prev.classList.add('hidden');
+        };
+        prev.appendChild(wrap);
+      } catch (err) { showToast(err.message, 'error'); }
+      e.target.value = '';
+    };
+
+    onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        const userRef = doc(db, 'users', user.uid);
+        const u = await getDoc(userRef);
+        const existing = u.data() || {};
+        const ensuredProfile = {
+          displayName: existing.displayName || user.displayName || user.email?.split('@')[0] || 'User',
+          photoURL: existing.photoURL || user.photoURL || '',
+          bio: existing.bio || '',
+          status: existing.status || 'offline'
+        };
+        if (!u.exists()) ensuredProfile.createdAt = serverTimestamp();
+        await setDoc(userRef, ensuredProfile, { merge: true });
+        const d = ensuredProfile;
+        currentUser = { uid: user.uid, displayName: d?.displayName || user.email?.split('@')[0], bio: d?.bio || '', photoURL: d?.photoURL || user.photoURL || '' };
+        document.getElementById('auth-screen').classList.add('hidden');
+        document.getElementById('main-app').classList.remove('hidden');
+        updateUserPill();
+        await updatePresence('online');
+        startPresenceHeartbeat();
+        loadServers();
+        const params = new URLSearchParams(location.search);
+        const invite = params.get('invite');
+        if (invite) { renderJoinModal(); document.getElementById('invite-code').value = invite; }
+      } else {
+        stopPresenceHeartbeat();
+        if (unsubMyMemberships) { unsubMyMemberships(); unsubMyMemberships = null; }
+        if (unsubMembers) { unsubMembers(); unsubMembers = null; }
+        clearMemberUserListeners();
+        memberUserData = {};
+        userPresence = {};
+        currentUser = null;
+        document.getElementById('auth-screen').classList.remove('hidden');
+        document.getElementById('main-app').classList.add('hidden');
+      }
+    });
+  </script>
+</body>
+</html>
