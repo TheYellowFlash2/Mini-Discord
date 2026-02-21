@@ -227,6 +227,8 @@
     const PUBLIC_SERVER_ID = 'public';
     let replyingTo = null;
     let activeMemberProfileUserId = null;
+    const NOTIFICATION_PREF_KEY = 'mini_discord_notifications_enabled';
+    let notificationsEnabled = localStorage.getItem(NOTIFICATION_PREF_KEY) === 'true';
 
     const EMOJI_CATEGORIES = {
       'Smileys': ['😀','😃','😄','😁','😆','😅','🤣','😂','🙂','🙃','😉','😊','😇','🥰','😍','🤩','😘','😗','☺','😚','😙','🥲','😋','😛','😜','🤪','😝','🤑','🤗','🤭','🤫','🤔','🤐','🤨','😐','😑','😶','😏','😒','🙄','😬','🤥','😌','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🤧','🥵','🥶','🥴','😵','🤯','🤠','🥳','🥸'],
@@ -289,6 +291,78 @@
     function debounce(fn, ms) {
       let t;
       return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    }
+
+    function notificationsSupported() {
+      return typeof Notification !== 'undefined';
+    }
+
+    function getNotificationPermissionLabel() {
+      if (!notificationsSupported()) return 'Unsupported';
+      if (Notification.permission === 'granted') return 'Granted';
+      if (Notification.permission === 'denied') return 'Denied';
+      return 'Not requested';
+    }
+
+    function updateNotificationToggleUI() {
+      const btn = document.getElementById('profile-notifications-toggle');
+      const status = document.getElementById('profile-notification-status');
+      if (btn) {
+        btn.textContent = notificationsEnabled ? 'On' : 'Off';
+        btn.className = `px-3 py-1 rounded text-sm font-medium transition ${notificationsEnabled ? 'bg-discord-blurple hover:bg-indigo-600 text-white' : 'bg-discord-dark hover:bg-discord-darker text-gray-300'}`;
+      }
+      if (status) status.textContent = `Permission: ${getNotificationPermissionLabel()}`;
+    }
+
+    async function setNotificationsEnabled(enabled) {
+      notificationsEnabled = !!enabled;
+      localStorage.setItem(NOTIFICATION_PREF_KEY, String(notificationsEnabled));
+      if (notificationsEnabled) {
+        if (!notificationsSupported()) {
+          notificationsEnabled = false;
+          localStorage.setItem(NOTIFICATION_PREF_KEY, 'false');
+          showToast('Notifications are not supported in this browser', 'error');
+          updateNotificationToggleUI();
+          return;
+        }
+        if (Notification.permission === 'default') {
+          const permission = await Notification.requestPermission();
+          if (permission !== 'granted') {
+            notificationsEnabled = false;
+            localStorage.setItem(NOTIFICATION_PREF_KEY, 'false');
+            showToast('Notification permission was not granted', 'error');
+          } else {
+            showToast('Desktop notifications enabled', 'success');
+          }
+        } else if (Notification.permission === 'denied') {
+          notificationsEnabled = false;
+          localStorage.setItem(NOTIFICATION_PREF_KEY, 'false');
+          showToast('Notifications are blocked in browser settings', 'error');
+        } else {
+          showToast('Desktop notifications enabled', 'success');
+        }
+      } else {
+        showToast('Desktop notifications disabled', 'info');
+      }
+      updateNotificationToggleUI();
+    }
+
+    function maybeNotifyForMessage(messageId, messageData) {
+      if (!notificationsEnabled || !notificationsSupported()) return;
+      if (Notification.permission !== 'granted') return;
+      if (!messageData || messageData.userId === currentUser?.uid) return;
+      if (!document.hidden) return;
+      const sender = getUserDisplayName(memberUserData[messageData.userId], messageData) || 'Someone';
+      const channelName = channels[messageData.channelId]?.name || 'channel';
+      const text = (messageData.text || '').trim();
+      const attachmentText = (messageData.attachments || []).length ? 'Sent an attachment' : 'New message';
+      const body = text ? text.slice(0, 140) : attachmentText;
+      const notif = new Notification(`${sender} in #${channelName}`, {
+        body,
+        icon: messageData.photoURL || memberUserData[messageData.userId]?.photoURL || '',
+        tag: `msg-${messageId}`
+      });
+      notif.onclick = () => window.focus();
     }
 
     function getUserDisplayName(userData, memberData) {
@@ -417,6 +491,15 @@
             <label class="block text-sm text-gray-400 mb-1">About Me</label>
             <textarea id="profile-bio" rows="3" maxlength="200" placeholder="Say something about yourself" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple resize-none">${escapeHtml(currentUser?.bio || '')}</textarea>
           </div>
+          <div class="rounded border border-discord-dark bg-discord-dark/40 p-3">
+            <div class="flex items-center justify-between gap-2">
+              <div>
+                <div class="text-sm text-gray-200">Desktop Notifications</div>
+                <div id="profile-notification-status" class="text-xs text-gray-500 mt-0.5">Permission: ${getNotificationPermissionLabel()}</div>
+              </div>
+              <button type="button" id="profile-notifications-toggle" class="px-3 py-1 rounded text-sm font-medium transition ${notificationsEnabled ? 'bg-discord-blurple hover:bg-indigo-600 text-white' : 'bg-discord-dark hover:bg-discord-darker text-gray-300'}">${notificationsEnabled ? 'On' : 'Off'}</button>
+            </div>
+          </div>
           <button type="submit" class="w-full py-2 bg-discord-blurple hover:bg-indigo-600 rounded font-medium">Save</button>
         </form>
       `);
@@ -424,6 +507,10 @@
       const initialSpan = document.getElementById('profile-avatar-initial');
       if (currentUser?.photoURL) { img.src = currentUser.photoURL; img.style.display = 'block'; initialSpan.style.display = 'none'; }
       else { img.style.display = 'none'; initialSpan.style.display = 'flex'; }
+      document.getElementById('profile-notifications-toggle').onclick = async () => {
+        await setNotificationsEnabled(!notificationsEnabled);
+      };
+      updateNotificationToggleUI();
       document.getElementById('profile-avatar-input').onchange = async (e) => {
         const file = e.target.files?.[0];
         if (!file) return;
@@ -751,6 +838,7 @@
       messageListeners = messageListeners.filter(() => false);
       if (!currentChannelId) return;
       document.getElementById('messages-loading').classList.remove('hidden');
+      let initialSnapshotLoaded = false;
       const q = query(
         collection(db, 'messages'),
         where('channelId', '==', currentChannelId),
@@ -758,6 +846,13 @@
         limit(MESSAGE_LIMIT)
       );
       const unsub = onSnapshot(q, (snap) => {
+        if (initialSnapshotLoaded) {
+          snap.docChanges().forEach((change) => {
+            if (change.type === 'added') maybeNotifyForMessage(change.doc.id, change.doc.data());
+          });
+        } else {
+          initialSnapshotLoaded = true;
+        }
         messages = {};
         snap.docs.forEach(d => { messages[d.id] = { id: d.id, ...d.data() }; });
         lastDoc = snap.docs[snap.docs.length - 1];
