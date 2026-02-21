@@ -154,7 +154,7 @@
             <div class="flex-1 flex items-center gap-2 bg-discord-darker rounded-lg px-4 py-2 min-h-[44px]">
               <button id="btn-emoji" class="text-gray-400 hover:text-white p-1" title="Emoji">😀</button>
               <button id="btn-gif" class="text-gray-400 hover:text-white p-1" title="GIF">GIF</button>
-              <input type="file" id="file-attach" accept="image/*" class="hidden">
+              <input type="file" id="file-attach" class="hidden">
               <button id="btn-attach" class="text-gray-400 hover:text-white p-1 text-lg" title="Upload file">📁</button>
               <input id="message-input" type="text" placeholder="Message #general" class="flex-1 bg-transparent outline-none text-sm py-1" maxlength="2000">
               <div id="attachment-preview" class="hidden flex items-center gap-2 flex-wrap"></div>
@@ -262,6 +262,24 @@
       const div = document.createElement('div');
       div.textContent = text;
       return div.innerHTML;
+    }
+
+    function isImageAttachment(att = {}) {
+      const name = att.name || '';
+      const mime = att.mime || '';
+      return att.type === 'image' || mime.startsWith('image/') || /\.(gif|png|jpg|jpeg|webp|bmp|svg|avif)$/i.test(name);
+    }
+
+    function formatFileSize(bytes = 0) {
+      if (!Number.isFinite(bytes) || bytes <= 0) return '';
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let size = bytes;
+      let unitIdx = 0;
+      while (size >= 1024 && unitIdx < units.length - 1) {
+        size /= 1024;
+        unitIdx += 1;
+      }
+      return `${size.toFixed(size >= 10 || unitIdx === 0 ? 0 : 1)} ${units[unitIdx]}`;
     }
 
     function debounce(fn, ms) {
@@ -795,10 +813,13 @@
         const edited = m.editedAt ? ' <span class="text-xs text-gray-500">(edited)</span>' : '';
         let content = escapeHtml(m.text || '');
         (m.attachments || []).forEach((att) => {
-          if (att.url && (att.type === 'image' || /\.(gif|png|jpg|jpeg|webp)$/i.test(att.url))) {
+          if (att.url && isImageAttachment(att)) {
             content += `<div class="mt-2"><img src="${escapeHtml(att.url)}" class="max-w-sm max-h-64 rounded cursor-pointer" alt="attachment" onclick="window.open('${escapeHtml(att.url)}')"></div>`;
           } else if (att.url) {
-            content += `<div class="mt-2"><a href="${escapeHtml(att.url)}" target="_blank" class="text-discord-blurple hover:underline">Attachment</a></div>`;
+            const safeName = escapeHtml(att.name || 'Attachment');
+            const sizeLabel = formatFileSize(att.size);
+            const meta = sizeLabel ? ` <span class="text-xs text-gray-500">(${sizeLabel})</span>` : '';
+            content += `<div class="mt-2"><a href="${escapeHtml(att.url)}" download="${safeName}" target="_blank" class="text-discord-blurple hover:underline">📎 ${safeName}</a>${meta}</div>`;
           }
         });
         const adminDelBtn = isAdmin() ? `<button type="button" class="opacity-0 group-hover:opacity-100 ml-1 text-xs text-discord-red hover:underline transition" data-delete-msg="${m.id}" title="Delete message">Delete</button>` : '';
@@ -1355,19 +1376,32 @@
     document.getElementById('btn-attach').onclick = () => document.getElementById('file-attach').click();
     document.getElementById('file-attach').onchange = async (e) => {
       const file = e.target.files?.[0];
-      if (!file || !file.type.startsWith('image/')) return;
+      if (!file) return;
       try {
         const r = ref(storage, `messages/${currentUser.uid}/${Date.now()}_${file.name}`);
         await uploadBytes(r, file);
         const url = await getDownloadURL(r);
-        pendingAttachments.push({ type: 'image', url });
+        const attachment = {
+          type: file.type.startsWith('image/') ? 'image' : 'file',
+          url,
+          name: file.name,
+          size: file.size,
+          mime: file.type || 'application/octet-stream'
+        };
+        pendingAttachments.push(attachment);
         const prev = document.getElementById('attachment-preview');
         prev.classList.remove('hidden');
         const wrap = document.createElement('div');
-        wrap.className = 'flex items-center gap-1';
-        wrap.innerHTML = `<img src="${url}" class="w-12 h-12 object-cover rounded" alt=""><button type="button" class="text-discord-red text-xs" data-remove>✕</button>`;
+        wrap.className = 'flex items-center gap-1 bg-discord-dark px-2 py-1 rounded max-w-[220px]';
+        const fileName = escapeHtml(file.name);
+        const sizeLabel = formatFileSize(file.size);
+        if (attachment.type === 'image') {
+          wrap.innerHTML = `<img src="${url}" class="w-10 h-10 object-cover rounded" alt="${fileName}"><span class="text-xs text-gray-300 truncate" title="${fileName}">${fileName}</span>${sizeLabel ? `<span class="text-[10px] text-gray-500">${sizeLabel}</span>` : ''}<button type="button" class="text-discord-red text-xs" data-remove>✕</button>`;
+        } else {
+          wrap.innerHTML = `<span class="text-sm">📎</span><span class="text-xs text-gray-300 truncate" title="${fileName}">${fileName}</span>${sizeLabel ? `<span class="text-[10px] text-gray-500">${sizeLabel}</span>` : ''}<button type="button" class="text-discord-red text-xs" data-remove>✕</button>`;
+        }
         wrap.querySelector('[data-remove]').onclick = () => {
-          pendingAttachments = pendingAttachments.filter(a => a.url !== url);
+          pendingAttachments = pendingAttachments.filter(a => a.url !== attachment.url);
           wrap.remove();
           if (pendingAttachments.length === 0) prev.classList.add('hidden');
         };
