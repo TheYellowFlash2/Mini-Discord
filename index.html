@@ -46,6 +46,8 @@
     .gif-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 4px; }
     .emoji-btn { border: 1px solid rgba(255,255,255,0.1); }
     .emoji-btn:hover { border-color: rgba(255,255,255,0.3); background: rgba(255,255,255,0.05); }
+    .context-menu { min-width: 180px; }
+    .context-item:hover { background: rgba(255,255,255,0.06); }
   </style>
 </head>
 <body class="bg-discord-darkest text-gray-100 min-h-screen overflow-hidden">
@@ -189,6 +191,7 @@
   </div>
 
   <div id="toast-container" class="fixed bottom-4 right-4 z-[100] flex flex-col gap-2"></div>
+  <div id="context-menu" class="context-menu fixed z-[120] hidden bg-discord-darker border border-discord-dark rounded shadow-xl py-1"></div>
 
   <script type="module">
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
@@ -242,6 +245,7 @@
     let attachmentCleanupInterval = null;
     let replyingTo = null;
     let activeMemberProfileUserId = null;
+    let contextMenuMessage = null;
     const NOTIFICATION_PREF_KEY = 'mini_discord_notifications_enabled';
     let notificationsEnabled = localStorage.getItem(NOTIFICATION_PREF_KEY) === 'true';
     const REPORT_REASONS = ['Harassment', 'Spam', 'Hate Speech', 'Threats', 'Impersonation', 'Other'];
@@ -1068,7 +1072,72 @@
     };
     modal.close.onclick = () => modal.closeModal();
     modal.backdrop.onclick = (e) => { if (e.target === modal.backdrop) modal.closeModal(); };
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') modal.closeModal(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        hideContextMenu();
+        modal.closeModal();
+      }
+    });
+
+    function hideContextMenu() {
+      const menu = document.getElementById('context-menu');
+      if (!menu) return;
+      menu.classList.add('hidden');
+      menu.innerHTML = '';
+      contextMenuMessage = null;
+    }
+
+    function showMessageContextMenu(evt, messageData, displayName, isOwn, isBot) {
+      const menu = document.getElementById('context-menu');
+      if (!menu || !messageData?.id) return;
+      evt.preventDefault();
+      contextMenuMessage = messageData;
+      const canReport = !isOwn && !isBot && messageData.userId !== BOT_USER_ID;
+      const canDelete = isAdmin() || isOwn;
+      const safeName = escapeHtml(displayName || 'User');
+      const hasText = !!(messageData.text || '').trim();
+      menu.innerHTML = `
+        <button type="button" data-cm="reply" class="context-item w-full text-left px-3 py-2 text-sm text-gray-200">Reply to ${safeName}</button>
+        ${hasText ? '<button type="button" data-cm="copy" class="context-item w-full text-left px-3 py-2 text-sm text-gray-200">Copy Message</button>' : ''}
+        <button type="button" data-cm="profile" class="context-item w-full text-left px-3 py-2 text-sm text-gray-200">View Profile</button>
+        ${canReport ? '<button type="button" data-cm="report" class="context-item w-full text-left px-3 py-2 text-sm text-amber-300">Report User</button>' : ''}
+        ${canDelete ? '<button type="button" data-cm="delete" class="context-item w-full text-left px-3 py-2 text-sm text-discord-red">Delete Message</button>' : ''}
+      `;
+      const pad = 8;
+      const maxX = window.innerWidth - 190;
+      const maxY = window.innerHeight - 220;
+      menu.style.left = `${Math.max(pad, Math.min(evt.clientX, maxX))}px`;
+      menu.style.top = `${Math.max(pad, Math.min(evt.clientY, maxY))}px`;
+      menu.classList.remove('hidden');
+      menu.querySelectorAll('[data-cm]').forEach((btn) => {
+        btn.onclick = async () => {
+          const action = btn.dataset.cm;
+          const m = contextMenuMessage;
+          hideContextMenu();
+          if (!m) return;
+          if (action === 'reply') {
+            replyingTo = { id: m.id, userId: m.userId, displayName, text: (m.text || '').slice(0, 100) };
+            document.getElementById('reply-preview').classList.remove('hidden');
+            document.getElementById('reply-preview-name').textContent = replyingTo.displayName;
+            document.getElementById('reply-preview-text').textContent = replyingTo.text || '(attachment)';
+            document.getElementById('message-input').focus();
+          }
+          if (action === 'copy') {
+            try {
+              await navigator.clipboard.writeText(m.text || '');
+              showToast('Message copied', 'success');
+            } catch (_) {
+              showToast('Copy failed', 'error');
+            }
+          }
+          if (action === 'profile') renderMemberProfileModal(m.userId);
+          if (action === 'report') renderReportUserModal(m.userId);
+          if (action === 'delete') {
+            if (confirm('Delete this message?')) deleteAnyMessage(m.id);
+          }
+        };
+      });
+    }
 
     async function signUp(email, password, displayName) {
       try {
@@ -1082,7 +1151,14 @@
         });
         showToast('Account created!', 'success');
         modal.closeModal();
-      } catch (e) { showToast(e.message || 'Signup failed', 'error'); }
+      } catch (e) {
+        const raw = (e?.message || '').toLowerCase();
+        if (raw.includes('email') && raw.includes('already')) {
+          showToast('That email is already used. Usernames can still be duplicated.', 'error');
+          return;
+        }
+        showToast(e.message || 'Signup failed', 'error');
+      }
     }
 
     async function logIn(email, password) {
@@ -1129,8 +1205,9 @@
       modal.open('Create Account', `
         <form id="signup-form" class="space-y-4">
           <div>
-            <label class="block text-sm text-gray-400 mb-1">Display Name</label>
-            <input type="text" id="signup-display" placeholder="Your name" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+            <label class="block text-sm text-gray-400 mb-1">Username</label>
+            <input type="text" id="signup-display" placeholder="Choose a username" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+            <div class="text-xs text-gray-500 mt-1">Usernames are not unique. Multiple users can use the same username.</div>
           </div>
           <div>
             <label class="block text-sm text-gray-400 mb-1">Email</label>
@@ -1284,6 +1361,66 @@
         modal.closeModal();
         loadServers();
       } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function deleteServerPermanently(serverId) {
+      if (!serverId || !currentUser?.uid) return;
+      const srv = servers[serverId];
+      if (!srv) { showToast('Server not found', 'error'); return; }
+      if (serverId === PUBLIC_SERVER_ID) { showToast('Public server cannot be deleted', 'error'); return; }
+      if (srv.ownerId !== currentUser.uid) { showToast('Only owner can delete server', 'error'); return; }
+      try {
+        showToast('Deleting server...', 'info');
+        const channelsSnap = await getDocs(query(collection(db, 'channels'), where('serverId', '==', serverId)));
+        for (const ch of channelsSnap.docs) {
+          try {
+            const typingSnap = await getDocs(collection(db, 'channels', ch.id, 'typing'));
+            for (const t of typingSnap.docs) await deleteDoc(t.ref);
+          } catch (_) {}
+          await deleteDoc(ch.ref);
+        }
+
+        const msgsSnap = await getDocs(query(collection(db, 'messages'), where('serverId', '==', serverId)));
+        for (const m of msgsSnap.docs) {
+          await deleteMessageWithAttachments(m.id, m.data());
+        }
+
+        const invitesSnap = await getDocs(query(collection(db, 'invites'), where('serverId', '==', serverId)));
+        for (const inv of invitesSnap.docs) await deleteDoc(inv.ref);
+
+        const reportsSnap = await getDocs(query(collection(db, 'reports'), where('serverId', '==', serverId)));
+        for (const rep of reportsSnap.docs) await deleteDoc(rep.ref);
+
+        const membershipsSnap = await getDocs(query(collection(db, 'memberships'), where('serverId', '==', serverId)));
+        for (const mem of membershipsSnap.docs) await deleteDoc(mem.ref);
+
+        const memberDocs = await getDocs(collection(db, 'servers', serverId, 'members'));
+        for (const d of memberDocs.docs) await deleteDoc(d.ref);
+        const bannedDocs = await getDocs(collection(db, 'servers', serverId, 'banned'));
+        for (const d of bannedDocs.docs) await deleteDoc(d.ref);
+        const suspendedDocs = await getDocs(collection(db, 'servers', serverId, 'suspended'));
+        for (const d of suspendedDocs.docs) await deleteDoc(d.ref);
+        const emojiDocs = await getDocs(collection(db, 'servers', serverId, 'emojis'));
+        for (const d of emojiDocs.docs) await deleteDoc(d.ref);
+
+        const iconPath = getAttachmentStoragePath({ url: srv.icon || '' });
+        if (iconPath) {
+          try { await deleteObject(ref(storage, iconPath)); } catch (_) {}
+        }
+
+        await deleteDoc(doc(db, 'servers', serverId));
+        if (currentServerId === serverId) {
+          currentServerId = null;
+          currentChannelId = null;
+          renderChannelList();
+          renderMessages();
+        }
+        modal.closeModal();
+        showToast('Server deleted permanently', 'success');
+        await loadServers();
+      } catch (e) {
+        showToast(e.message || 'Failed to delete server', 'error');
+      }
     }
 
     function isAdmin(serverId) {
@@ -1645,6 +1782,7 @@
         const botBadge = isBot ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-discord-blurple text-white font-bold align-middle">BOT</span>' : '';
         const msgContent = `<div class="flex-1 min-w-0 max-w-[75%] ${isOwn ? 'text-right' : ''}"><div class="flex items-baseline gap-2 flex-wrap ${isOwn ? 'justify-end' : ''}"><span class="font-semibold text-white">${escapeHtml(displayName)}</span>${botBadge}<span class="text-xs text-gray-500">${time}</span>${edited}${replyBtn}${reportBtn}${adminDelBtn}</div>${replyPreview}<div class="text-gray-300 break-words ${isOwn ? 'bg-discord-blurple/30 rounded-lg px-3 py-2 inline-block' : ''}">${content}</div></div>`;
         div.innerHTML = `${avatar}${msgContent}`;
+        div.oncontextmenu = (e) => showMessageContextMenu(e, m, displayName, isOwn, isBot);
         list.appendChild(div);
         const delBtn = div.querySelector('[data-delete-msg]');
         if (delBtn) delBtn.onclick = () => { if (confirm('Delete this message?')) deleteAnyMessage(m.id); };
@@ -1912,7 +2050,9 @@
     }
 
     async function deleteAnyMessage(msgId) {
-      if (!isAdmin()) return;
+      const data = messages[msgId];
+      const isOwnMessage = data?.userId === currentUser?.uid;
+      if (!isAdmin() && !isOwnMessage) return;
       try {
         const result = await deleteMessageWithAttachments(msgId);
         showToast(`Message deleted (${result.filesDeleted} file(s) removed)`, 'success');
@@ -1997,6 +2137,13 @@
                 </div>
               </div>
             </div>
+            <div>
+              <h3 class="text-sm font-semibold text-gray-400 mb-2">Danger Zone</h3>
+              <div class="rounded border border-discord-red/50 bg-discord-darkest/40 p-3">
+                <p class="text-xs text-gray-400 mb-2">Delete this server and all messages, channels, reports, invites, memberships, and member records.</p>
+                <button type="button" id="admin-delete-server" class="text-xs px-3 py-1.5 rounded bg-discord-red hover:bg-red-500">Delete Server Permanently</button>
+              </div>
+            </div>
           ` : ''}
         </div>
       `);
@@ -2016,6 +2163,12 @@
           if (host) host.innerHTML = '<p class="text-discord-red text-sm py-2">Failed to load reports</p>';
         });
       if (isOwner) {
+        document.getElementById('admin-delete-server').onclick = async () => {
+          const serverName = servers[currentServerId]?.name || 'this server';
+          if (!confirm(`Delete "${serverName}" permanently? This cannot be undone.`)) return;
+          if (!confirm('Final confirmation: this removes all server data forever.')) return;
+          await deleteServerPermanently(currentServerId);
+        };
         document.getElementById('admin-delete-older').onclick = async () => {
           const scope = document.getElementById('admin-cleanup-scope').value;
           const ageValue = document.getElementById('admin-cleanup-age-value').value;
@@ -2334,6 +2487,12 @@
     document.getElementById('btn-load-more').onclick = loadOlderMessages;
     document.getElementById('btn-members-toggle').onclick = () => document.getElementById('members-sidebar').classList.toggle('hidden');
     document.getElementById('btn-toggle-channel').onclick = () => document.getElementById('channel-sidebar').classList.toggle('hidden');
+    document.addEventListener('click', () => hideContextMenu());
+    document.addEventListener('contextmenu', (e) => {
+      if (!e.target.closest('.message-group')) hideContextMenu();
+    });
+    window.addEventListener('resize', hideContextMenu);
+    document.getElementById('messages-container').addEventListener('scroll', hideContextMenu);
     document.addEventListener('visibilitychange', () => {
       if (!currentUser?.uid) return;
       updatePresence(document.hidden ? 'idle' : 'online').catch(() => {});
