@@ -48,6 +48,41 @@
     .emoji-btn:hover { border-color: rgba(255,255,255,0.3); background: rgba(255,255,255,0.05); }
     .context-menu { min-width: 180px; }
     .context-item:hover { background: rgba(255,255,255,0.06); }
+    @media (max-width: 767px) {
+      #channel-sidebar {
+        position: fixed;
+        left: 72px;
+        top: 0;
+        bottom: 0;
+        width: min(84vw, 320px);
+        z-index: 70;
+        display: flex;
+      }
+      #members-sidebar {
+        position: fixed;
+        right: 0;
+        top: 0;
+        bottom: 0;
+        width: min(82vw, 320px);
+        z-index: 70;
+        display: flex;
+      }
+      #btn-toggle-channel {
+        top: max(8px, env(safe-area-inset-top));
+        left: 80px;
+      }
+      #messages-container {
+        padding-left: 10px;
+        padding-right: 10px;
+      }
+      #message-input-area {
+        padding-bottom: calc(12px + env(safe-area-inset-bottom));
+      }
+      #voice-channel-panel {
+        padding-left: 10px;
+        padding-right: 10px;
+      }
+    }
   </style>
 </head>
 <body class="bg-discord-darkest text-gray-100 min-h-screen overflow-hidden">
@@ -252,6 +287,10 @@
     let voiceMembers = {};
     let activeVoiceChannelId = null;
     let activeVoiceStream = null;
+    let voicePeerConnections = {};
+    let voiceSignalUnsubs = {};
+    let handledVoiceSignalsByPeer = {};
+    let remoteVoiceAudioEls = {};
     let serversLoadVersion = 0;
     let membersLoadVersion = 0;
     let presenceInterval = null;
@@ -307,6 +346,9 @@
     let notificationsEnabled = localStorage.getItem(NOTIFICATION_PREF_KEY) === 'true';
     const REPORT_REASONS = ['Harassment', 'Spam', 'Hate Speech', 'Threats', 'Impersonation', 'Other'];
     const BOT_MEMORY_LIMIT = 6;
+    const VOICE_RTC_CONFIG = {
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    };
 
     const EMOJI_CATEGORIES = {
       'Smileys': ['😀','😃','😄','😁','😆','😅','🤣','😂','🙂','🙃','😉','😊','😇','🥰','😍','🤩','😘','😗','☺','😚','😙','🥲','😋','😛','😜','🤪','😝','🤑','🤗','🤭','🤫','🤔','🤐','🤨','😐','😑','😶','😏','😒','🙄','😬','🤥','😌','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🤧','🥵','🥶','🥴','😵','🤯','🤠','🥳','🥸'],
@@ -2571,7 +2613,12 @@
         const btn = document.createElement('button');
         btn.className = `w-full text-left px-2 py-1.5 rounded flex items-center gap-2 text-sm ${currentChannelId === ch.id ? 'bg-discord-dark text-white' : 'text-gray-400 hover:bg-discord-dark hover:text-white'}`;
         btn.innerHTML = `<span>${isVoice ? '🔊' : '#'}</span><span class="truncate">${escapeHtml(ch.name)}</span>`;
-        btn.onclick = () => selectChannel(ch.id);
+        btn.onclick = () => {
+          selectChannel(ch.id);
+          if (window.innerWidth < 768) {
+            document.getElementById('channel-sidebar')?.classList.add('hidden');
+          }
+        };
         el.appendChild(btn);
       };
       if (textItems.length) {
@@ -2621,6 +2668,14 @@
           const voiceMembersSnap = await getDocs(collection(db, 'channels', channelId, 'voiceMembers'));
           for (const v of voiceMembersSnap.docs) await deleteDoc(v.ref);
         } catch (_) {}
+        try {
+          const signalPairs = await getDocs(collection(db, 'channels', channelId, 'voiceSignals'));
+          for (const pair of signalPairs.docs) {
+            const eventsSnap = await getDocs(collection(db, 'channels', channelId, 'voiceSignals', pair.id, 'events'));
+            for (const ev of eventsSnap.docs) await deleteDoc(ev.ref);
+            await deleteDoc(pair.ref);
+          }
+        } catch (_) {}
         const msgs = await getDocs(query(collection(db, 'messages'), where('channelId', '==', channelId)));
         for (const m of msgs.docs) await deleteMessageWithAttachments(m.id, m.data());
         await deleteDoc(doc(db, 'channels', channelId));
@@ -2636,6 +2691,7 @@
         unsubVoiceMembers = null;
       }
       voiceMembers = {};
+      teardownVoiceRtc();
       renderVoicePanel();
     }
 
@@ -2656,10 +2712,171 @@
       activeVoiceStream = null;
     }
 
+    function getVoicePairId(a, b) {
+      return [String(a || ''), String(b || '')].sort().join('__');
+    }
+
+    function getVoiceEventsRef(channelId, remoteUid) {
+      const pairId = getVoicePairId(currentUser?.uid, remoteUid);
+      return collection(db, 'channels', channelId, 'voiceSignals', pairId, 'events');
+    }
+
+    function removeRemoteVoiceAudio(remoteUid) {
+      const el = remoteVoiceAudioEls[remoteUid];
+      if (!el) return;
+      try { el.pause(); } catch (_) {}
+      el.srcObject = null;
+      el.remove();
+      delete remoteVoiceAudioEls[remoteUid];
+    }
+
+    function teardownVoicePeer(remoteUid) {
+      const unsub = voiceSignalUnsubs[remoteUid];
+      if (typeof unsub === 'function') unsub();
+      delete voiceSignalUnsubs[remoteUid];
+      delete handledVoiceSignalsByPeer[remoteUid];
+      const pc = voicePeerConnections[remoteUid];
+      if (pc) {
+        try { pc.onicecandidate = null; } catch (_) {}
+        try { pc.ontrack = null; } catch (_) {}
+        try { pc.close(); } catch (_) {}
+      }
+      delete voicePeerConnections[remoteUid];
+      removeRemoteVoiceAudio(remoteUid);
+    }
+
+    function teardownVoiceRtc() {
+      Object.keys(voicePeerConnections).forEach((uid) => teardownVoicePeer(uid));
+    }
+
+    async function emitVoiceSignal(remoteUid, payload) {
+      if (!activeVoiceChannelId || !currentUser?.uid || !remoteUid) return;
+      try {
+        await addDoc(getVoiceEventsRef(activeVoiceChannelId, remoteUid), {
+          from: currentUser.uid,
+          to: remoteUid,
+          ...payload,
+          createdAt: serverTimestamp()
+        });
+      } catch (_) {}
+    }
+
+    function subscribeVoiceSignals(remoteUid) {
+      if (!activeVoiceChannelId || !remoteUid || voiceSignalUnsubs[remoteUid]) return;
+      handledVoiceSignalsByPeer[remoteUid] = handledVoiceSignalsByPeer[remoteUid] || new Set();
+      voiceSignalUnsubs[remoteUid] = onSnapshot(getVoiceEventsRef(activeVoiceChannelId, remoteUid), (snap) => {
+        snap.docChanges().forEach((change) => {
+          if (change.type !== 'added') return;
+          const id = change.doc.id;
+          const handled = handledVoiceSignalsByPeer[remoteUid];
+          if (handled?.has(id)) return;
+          handled?.add(id);
+          const data = change.doc.data() || {};
+          if (data.from === currentUser?.uid) return;
+          processVoiceSignal(remoteUid, data).catch(() => {});
+        });
+      }, () => {});
+    }
+
+    async function processVoiceSignal(remoteUid, data) {
+      if (!activeVoiceChannelId || !currentUser?.uid) return;
+      const type = data?.type;
+      if (!type) return;
+      const pc = await ensureVoicePeer(remoteUid);
+      if (!pc) return;
+      if (type === 'offer' && data.sdp) {
+        try {
+          if (pc.signalingState !== 'stable') {
+            await pc.setLocalDescription({ type: 'rollback' }).catch(() => {});
+          }
+          await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          await emitVoiceSignal(remoteUid, { type: 'answer', sdp: pc.localDescription });
+        } catch (_) {}
+        return;
+      }
+      if (type === 'answer' && data.sdp) {
+        if (pc.signalingState === 'have-local-offer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(data.sdp)).catch(() => {});
+        }
+        return;
+      }
+      if (type === 'candidate' && data.candidate) {
+        await pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
+      }
+    }
+
+    async function ensureVoicePeer(remoteUid) {
+      if (!remoteUid || remoteUid === currentUser?.uid || !activeVoiceChannelId) return null;
+      if (voicePeerConnections[remoteUid]) return voicePeerConnections[remoteUid];
+      const pc = new RTCPeerConnection(VOICE_RTC_CONFIG);
+      voicePeerConnections[remoteUid] = pc;
+      subscribeVoiceSignals(remoteUid);
+      (activeVoiceStream?.getTracks() || []).forEach((track) => {
+        try { pc.addTrack(track, activeVoiceStream); } catch (_) {}
+      });
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          emitVoiceSignal(remoteUid, {
+            type: 'candidate',
+            candidate: event.candidate.toJSON ? event.candidate.toJSON() : event.candidate
+          }).catch(() => {});
+        }
+      };
+      pc.ontrack = (event) => {
+        let el = remoteVoiceAudioEls[remoteUid];
+        if (!el) {
+          el = document.createElement('audio');
+          el.autoplay = true;
+          el.playsInline = true;
+          el.className = 'hidden';
+          document.body.appendChild(el);
+          remoteVoiceAudioEls[remoteUid] = el;
+        }
+        const [stream] = event.streams || [];
+        if (stream) {
+          el.srcObject = stream;
+          el.play().catch(() => {});
+        }
+      };
+      pc.onconnectionstatechange = () => {
+        if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) {
+          teardownVoicePeer(remoteUid);
+        }
+      };
+      const shouldInitiate = String(currentUser.uid) < String(remoteUid);
+      if (shouldInitiate) {
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          await emitVoiceSignal(remoteUid, { type: 'offer', sdp: pc.localDescription });
+        } catch (_) {}
+      }
+      return pc;
+    }
+
+    function reconcileVoicePeers() {
+      if (!activeVoiceChannelId || !currentUser?.uid) {
+        teardownVoiceRtc();
+        return;
+      }
+      const remoteIds = new Set(
+        Object.keys(voiceMembers).filter((uid) => uid !== currentUser.uid)
+      );
+      remoteIds.forEach((uid) => {
+        ensureVoicePeer(uid).catch(() => {});
+      });
+      Object.keys(voicePeerConnections).forEach((uid) => {
+        if (!remoteIds.has(uid)) teardownVoicePeer(uid);
+      });
+    }
+
     async function leaveActiveVoiceChannel() {
       if (!activeVoiceChannelId || !currentUser?.uid) return;
       const channelId = activeVoiceChannelId;
       activeVoiceChannelId = null;
+      teardownVoiceRtc();
       try {
         await deleteDoc(doc(db, 'channels', channelId, 'voiceMembers', currentUser.uid));
       } catch (_) {}
@@ -2675,6 +2892,9 @@
         return;
       }
       try {
+        if (typeof RTCPeerConnection === 'undefined') {
+          throw new Error('Voice is not supported in this browser');
+        }
         await ensureMicAccess();
         if (activeVoiceChannelId && activeVoiceChannelId !== channelId) {
           await leaveActiveVoiceChannel();
@@ -2686,9 +2906,11 @@
           joinedAt: serverTimestamp()
         }, { merge: true });
         showToast('Microphone connected', 'success');
+        reconcileVoicePeers();
         renderVoicePanel();
       } catch (err) {
         activeVoiceChannelId = null;
+        teardownVoiceRtc();
         stopMicStream();
         const msg = String(err?.message || '');
         if (/missing or insufficient permissions/i.test(msg)) {
@@ -2708,6 +2930,7 @@
         const next = {};
         snap.docs.forEach((d) => { next[d.id] = { id: d.id, ...d.data() }; });
         voiceMembers = next;
+        reconcileVoicePeers();
         renderVoicePanel();
       }, () => {});
     }
