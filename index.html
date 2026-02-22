@@ -61,6 +61,7 @@
       measurementId: "G-V0K3TN8183"
     };
     const GIPHY_API_KEY = "peAMzd2AaeUlKwbMp86bp1wLxHorJFXu";
+    const MISTRAL_API_KEY = "ZtJVf6hjKb3FWeVgsFApxIpqs2oKg2U3";
     const DEBUG_MODE = false;
   </script>
   <!-- ========== END CONFIG ========== -->
@@ -225,6 +226,11 @@
     const PRESENCE_STALE_MS = 90000;
     let pendingAttachments = [];
     const PUBLIC_SERVER_ID = 'public';
+    const BOT_USER_ID = 'global-bot-mistral';
+    const BOT_DISPLAY_NAME = 'Mistral';
+    const BOT_MODEL = 'pixtral-12b-2409';
+    const PROFANITY_WORDS = ['fuck','fucking','shit','bitch','asshole','bastard','cunt','nigger','nigga','faggot','retard','whore','slut','dick','pussy'];
+    const moderationCooldownByUser = {};
     let replyingTo = null;
     let activeMemberProfileUserId = null;
     const NOTIFICATION_PREF_KEY = 'mini_discord_notifications_enabled';
@@ -367,6 +373,138 @@
 
     function getUserDisplayName(userData, memberData) {
       return (userData?.displayName || userData?.username || memberData?.displayName || memberData?.username || '').trim();
+    }
+
+    function textHasProfanity(text) {
+      const raw = (text || '').toLowerCase();
+      if (!raw) return false;
+      return PROFANITY_WORDS.some(word => new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(raw));
+    }
+
+    function extractMistralText(content) {
+      if (!content) return '';
+      if (typeof content === 'string') return content.trim();
+      if (Array.isArray(content)) {
+        return content.map(item => {
+          if (typeof item === 'string') return item;
+          if (item?.type === 'text') return item.text || '';
+          return '';
+        }).join(' ').trim();
+      }
+      return String(content).trim();
+    }
+
+    async function ensureGlobalBotProfile() {
+      await setDoc(doc(db, 'users', BOT_USER_ID), {
+        displayName: BOT_DISPLAY_NAME,
+        bio: 'Global assistant bot powered by Mistral.',
+        photoURL: '',
+        isBot: true,
+        status: 'online',
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    }
+
+    async function ensureBotMembership(serverId) {
+      if (!serverId) return;
+      const existing = await getDocs(query(
+        collection(db, 'memberships'),
+        where('serverId', '==', serverId),
+        where('userId', '==', BOT_USER_ID)
+      ));
+      if (!existing.empty) return;
+      await setDoc(doc(db, 'servers', serverId, 'members', BOT_USER_ID), { role: 'bot' }, { merge: true });
+      await setDoc(doc(collection(db, 'memberships')), { serverId, userId: BOT_USER_ID, role: 'bot' });
+    }
+
+    async function sendBotMessage(serverId, channelId, text) {
+      if (!serverId || !channelId || !text) return;
+      await addDoc(collection(db, 'messages'), {
+        serverId,
+        channelId,
+        userId: BOT_USER_ID,
+        displayName: BOT_DISPLAY_NAME,
+        photoURL: '',
+        text: String(text).slice(0, 2000),
+        attachments: [],
+        replyTo: null,
+        isBot: true,
+        createdAt: serverTimestamp()
+      });
+    }
+
+    async function askMistral(prompt) {
+      const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${MISTRAL_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: BOT_MODEL,
+          temperature: 0.6,
+          max_tokens: 300,
+          messages: [
+            { role: 'system', content: 'You are a concise Discord assistant bot.' },
+            { role: 'user', content: prompt }
+          ]
+        })
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(errText || `Mistral API error (${res.status})`);
+      }
+      const data = await res.json();
+      return extractMistralText(data?.choices?.[0]?.message?.content) || 'I could not generate a response.';
+    }
+
+    async function handleBotCommand(rawText) {
+      const prompt = rawText.replace(/^\/bot\s*/i, '').trim();
+      if (!prompt) {
+        showToast('Usage: /bot <message>', 'info');
+        return true;
+      }
+      try {
+        await ensureGlobalBotProfile();
+        await ensureBotMembership(currentServerId);
+        const reply = await askMistral(prompt);
+        await sendBotMessage(currentServerId, currentChannelId, reply);
+      } catch (_) {
+        showToast('Bot failed to respond', 'error');
+        await sendBotMessage(currentServerId, currentChannelId, 'Bot is currently unavailable. Please try again.');
+      }
+      return true;
+    }
+
+    async function kickUserFromServer(serverId, userId, reason = 'Kicked') {
+      if (!serverId || !userId || userId === BOT_USER_ID) return;
+      const srv = servers[serverId];
+      if (srv?.ownerId === userId) return;
+      const mem = Object.values(members).find(m => m.serverId === serverId && m.userId === userId);
+      if (!mem) return;
+      await deleteDoc(doc(db, 'servers', serverId, 'members', userId));
+      await deleteDoc(doc(db, 'memberships', mem.id));
+      await ensureUserPublicMembership(userId);
+      showToast(reason, 'error');
+    }
+
+    async function moderateMessageIfNeeded(messageData) {
+      if (!messageData || !currentUser?.uid) return;
+      if (messageData.serverId === PUBLIC_SERVER_ID) return;
+      if (!messageData.text || !textHasProfanity(messageData.text)) return;
+      if (!isAdmin(messageData.serverId)) return;
+      const offenderId = messageData.userId;
+      if (!offenderId || offenderId === currentUser.uid || offenderId === BOT_USER_ID) return;
+      const now = Date.now();
+      const last = moderationCooldownByUser[offenderId] || 0;
+      if (now - last < 30000) return;
+      moderationCooldownByUser[offenderId] = now;
+      try {
+        await kickUserFromServer(messageData.serverId, offenderId, 'User kicked for profanity');
+        if (messageData.channelId) {
+          await sendBotMessage(messageData.serverId, messageData.channelId, 'A user was kicked for profanity.');
+        }
+      } catch (_) {}
     }
 
     const modal = {
@@ -848,7 +986,11 @@
       const unsub = onSnapshot(q, (snap) => {
         if (initialSnapshotLoaded) {
           snap.docChanges().forEach((change) => {
-            if (change.type === 'added') maybeNotifyForMessage(change.doc.id, change.doc.data());
+            if (change.type === 'added') {
+              const data = change.doc.data();
+              maybeNotifyForMessage(change.doc.id, data);
+              moderateMessageIfNeeded(data);
+            }
           });
         } else {
           initialSnapshotLoaded = true;
@@ -896,6 +1038,7 @@
       arr.forEach((m) => {
         const liveUser = memberUserData[m.userId] || {};
         const displayName = getUserDisplayName(liveUser, m) || 'Unknown';
+        const isBot = m.userId === BOT_USER_ID || liveUser?.isBot || m.isBot;
         const avatarUrl = (liveUser.photoURL || m.photoURL || '').trim();
         const isOwn = m.userId === currentUser?.uid;
         const showAvatar = prevUserId !== m.userId || isOwn;
@@ -934,7 +1077,8 @@
         const adminDelBtn = isAdmin() ? `<button type="button" class="opacity-0 group-hover:opacity-100 ml-1 text-xs text-discord-red hover:underline transition" data-delete-msg="${m.id}" title="Delete message">Delete</button>` : '';
         const replyBtn = `<button type="button" class="opacity-0 group-hover:opacity-100 ml-1 text-xs text-discord-blurple hover:underline transition" data-reply-msg="${m.id}" title="Reply">Reply</button>`;
         const replyPreview = m.replyTo ? `<div class="mb-1 py-1 px-2 rounded border-l-2 border-discord-blurple/50 bg-discord-darkest/50 text-xs"><span class="text-discord-blurple">${escapeHtml(m.replyTo.displayName || 'Unknown')}</span><span class="text-gray-500">: </span><span class="text-gray-400 truncate">${escapeHtml((m.replyTo.text || '').slice(0, 80))}${(m.replyTo.text || '').length > 80 ? '...' : ''}</span></div>` : '';
-        const msgContent = `<div class="flex-1 min-w-0 max-w-[75%] ${isOwn ? 'text-right' : ''}"><div class="flex items-baseline gap-2 flex-wrap ${isOwn ? 'justify-end' : ''}"><span class="font-semibold text-white">${escapeHtml(displayName)}</span><span class="text-xs text-gray-500">${time}</span>${edited}${replyBtn}${adminDelBtn}</div>${replyPreview}<div class="text-gray-300 break-words ${isOwn ? 'bg-discord-blurple/30 rounded-lg px-3 py-2 inline-block' : ''}">${content}</div></div>`;
+        const botBadge = isBot ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-discord-blurple text-white font-bold align-middle">BOT</span>' : '';
+        const msgContent = `<div class="flex-1 min-w-0 max-w-[75%] ${isOwn ? 'text-right' : ''}"><div class="flex items-baseline gap-2 flex-wrap ${isOwn ? 'justify-end' : ''}"><span class="font-semibold text-white">${escapeHtml(displayName)}</span>${botBadge}<span class="text-xs text-gray-500">${time}</span>${edited}${replyBtn}${adminDelBtn}</div>${replyPreview}<div class="text-gray-300 break-words ${isOwn ? 'bg-discord-blurple/30 rounded-lg px-3 py-2 inline-block' : ''}">${content}</div></div>`;
         div.innerHTML = `${avatar}${msgContent}`;
         list.appendChild(div);
         const delBtn = div.querySelector('[data-delete-msg]');
@@ -959,6 +1103,11 @@
         return;
       }
       if (!text && pendingAttachments.length === 0) return;
+      if (text.toLowerCase().startsWith('/bot')) {
+        input.value = '';
+        await handleBotCommand(text);
+        return;
+      }
       try {
         const msg = {
           serverId: currentServerId,
@@ -1539,6 +1688,7 @@
         document.getElementById('main-app').classList.remove('hidden');
         updateUserPill();
         await updatePresence('online');
+        ensureGlobalBotProfile().catch(() => {});
         startPresenceHeartbeat();
         loadServers();
         const params = new URLSearchParams(location.search);
