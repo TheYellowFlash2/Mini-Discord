@@ -796,8 +796,8 @@
       return txt;
     }
 
-    function getDeterministicPublicReviewDecision(reason, details) {
-      const combined = `${String(reason || '')} ${String(details || '')}`.trim();
+    function getDeterministicPublicReviewDecision(reason, details, evidenceText = '') {
+      const combined = `${String(reason || '')} ${String(details || '')} ${String(evidenceText || '')}`.trim();
       const severeKeywords = ['threat', 'kill', 'hate', 'racist', 'nazi', 'harass', 'spam', 'scam', 'dox', 'slur'];
       const low = combined.toLowerCase();
       const severeHit = severeKeywords.some(k => low.includes(k)) || textHasProfanity(combined);
@@ -805,6 +805,27 @@
         return { action: 'suspend', minutes: 120, reason: 'Deterministic policy check triggered' };
       }
       return { action: 'none', minutes: 0, reason: 'No deterministic policy hit' };
+    }
+
+    async function getRecentPublicEvidenceForUser(userId, maxItems = 20) {
+      if (!userId) return [];
+      try {
+        const snap = await getDocs(query(
+          collection(db, 'messages'),
+          where('serverId', '==', PUBLIC_SERVER_ID),
+          where('userId', '==', userId),
+          limit(50)
+        ));
+        const rows = snap.docs.map((d) => {
+          const data = d.data() || {};
+          const at = data.createdAt?.toDate ? data.createdAt.toDate().getTime() : 0;
+          return { at, text: String(data.text || '').trim() };
+        }).filter(x => x.text);
+        rows.sort((a, b) => b.at - a.at);
+        return rows.slice(0, maxItems).map(x => x.text);
+      } catch (_) {
+        return [];
+      }
     }
 
     function getAttachmentStoragePath(att) {
@@ -1153,7 +1174,9 @@
       const reason = String(reportData.reason || 'Other');
       const details = String(reportData.details || '');
       const targetChannelId = currentChannelId || (Object.values(channels).find(c => c.serverId === PUBLIC_SERVER_ID)?.id || '');
-      const deterministic = getDeterministicPublicReviewDecision(reason, details);
+      const evidenceMessages = await getRecentPublicEvidenceForUser(reportedUserId, 20);
+      const evidenceText = evidenceMessages.join('\n');
+      const deterministic = getDeterministicPublicReviewDecision(reason, details, evidenceText);
       let action = deterministic.action;
       let minutes = deterministic.minutes;
       let reviewReason = deterministic.reason;
@@ -1169,6 +1192,8 @@
           'Example: {"action":"suspend","minutes":120,"reason":"Harassment"}',
           `Report reason: ${reason}`,
           `Report details: ${details || '(none)'}`,
+          `Recent chat evidence from reported user (${evidenceMessages.length} messages):\n${evidenceText || '(no recent messages found)'}`,
+          'Do not suspend based only on accusations. Prefer evidence from recent chat logs.',
           'Suspend only when content indicates clear harassment, hate, threats, or spam abuse.'
         ].join('\n');
         const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
