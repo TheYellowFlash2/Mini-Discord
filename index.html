@@ -796,6 +796,17 @@
       return txt;
     }
 
+    function getDeterministicPublicReviewDecision(reason, details) {
+      const combined = `${String(reason || '')} ${String(details || '')}`.trim();
+      const severeKeywords = ['threat', 'kill', 'hate', 'racist', 'nazi', 'harass', 'spam', 'scam', 'dox', 'slur'];
+      const low = combined.toLowerCase();
+      const severeHit = severeKeywords.some(k => low.includes(k)) || textHasProfanity(combined);
+      if (severeHit) {
+        return { action: 'suspend', minutes: 120, reason: 'Deterministic policy check triggered' };
+      }
+      return { action: 'none', minutes: 0, reason: 'No deterministic policy hit' };
+    }
+
     function getAttachmentStoragePath(att) {
       if (!att) return '';
       if (att.storagePath) return att.storagePath;
@@ -1178,26 +1189,35 @@
         const jsonRaw = extractJsonObjectFromText(raw);
         let parsed = {};
         try { parsed = JSON.parse(jsonRaw); } catch (_) { parsed = {}; }
-        const action = String(parsed.action || 'none').toLowerCase();
-        const minutes = Math.max(0, Math.min(1440, Math.floor(Number(parsed.minutes || 0))));
-        const reviewReason = String(parsed.reason || reason || 'Policy violation').slice(0, 180);
-        const strictAutoSuspend = textHasProfanity(`${reason} ${details}`);
-        if ((action === 'suspend' && minutes > 0) || strictAutoSuspend) {
-          const appliedMinutes = strictAutoSuspend && minutes === 0 ? 120 : Math.max(1, minutes);
+        let action = String(parsed.action || 'none').toLowerCase();
+        let minutes = Math.max(0, Math.min(1440, Math.floor(Number(parsed.minutes || 0))));
+        let reviewReason = String(parsed.reason || reason || 'Policy violation').slice(0, 180);
+        if (!['none', 'suspend'].includes(action)) action = 'none';
+        if (action === 'suspend' && minutes <= 0) minutes = 120;
+        const deterministic = getDeterministicPublicReviewDecision(reason, details);
+        if (deterministic.action === 'suspend' && minutes < deterministic.minutes) {
+          action = 'suspend';
+          minutes = deterministic.minutes;
+          reviewReason = deterministic.reason;
+        }
+        if (action === 'suspend' && minutes > 0) {
+          const appliedMinutes = Math.max(1, minutes);
           const untilMs = Date.now() + (appliedMinutes * 60 * 1000);
           await setDoc(doc(db, 'servers', PUBLIC_SERVER_ID, 'suspended', reportedUserId), {
             userId: reportedUserId,
-            reason: `[BOT-AUTO] ${strictAutoSuspend ? 'Policy keywords detected' : reviewReason}`,
+            reason: `[BOT-AUTO] ${reviewReason}`,
             reviewSource: 'public-report-bot',
             suspendedBy: currentUser.uid,
             suspendedAt: serverTimestamp(),
             untilMs
           }, { merge: true });
-          await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, `Report reviewed: user suspended for ${appliedMinutes} minute(s). Reason: ${strictAutoSuspend ? 'Policy keywords detected' : reviewReason}`);
+          await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, `Report reviewed: user suspended for ${appliedMinutes} minute(s). Reason: ${reviewReason}`);
         } else {
           await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, 'Report reviewed: no suspension applied.');
         }
       } catch (err) {
+        const targetChannelId = currentChannelId || (Object.values(channels).find(c => c.serverId === PUBLIC_SERVER_ID)?.id || '');
+        sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, 'Report review failed to run. Please ask an admin to review manually.').catch(() => {});
         if (DEBUG_MODE) console.error('Public report review failed', err);
       }
     }
