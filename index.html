@@ -807,6 +807,27 @@
       return { action: 'none', minutes: 0, reason: 'No deterministic policy hit' };
     }
 
+    function normalizeModerationText(text = '') {
+      return String(text || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function hasEvidenceMatch(details = '', evidenceMessages = []) {
+      const detailNorm = normalizeModerationText(details);
+      if (!detailNorm || detailNorm.length < 8) return false;
+      const evidenceNorm = evidenceMessages.map(m => normalizeModerationText(m)).filter(Boolean);
+      if (evidenceNorm.some(msg => msg.includes(detailNorm))) return true;
+      const detailTokens = detailNorm.split(' ').filter(t => t.length > 2);
+      if (detailTokens.length < 4) return false;
+      return evidenceNorm.some((msg) => {
+        const overlap = detailTokens.filter(t => msg.includes(t)).length;
+        return overlap >= Math.min(6, Math.ceil(detailTokens.length * 0.7));
+      });
+    }
+
     async function getRecentPublicEvidenceForUser(userId, maxItems = 20) {
       if (!userId) return [];
       try {
@@ -1178,9 +1199,17 @@
       const evidenceMessages = await getRecentPublicEvidenceForUser(reportedUserId, 20);
       const evidenceText = evidenceMessages.join('\n');
       const deterministic = getDeterministicPublicReviewDecision(reason, details, evidenceText);
+      const evidenceVerified = hasEvidenceMatch(details, evidenceMessages);
       let action = deterministic.action;
       let minutes = deterministic.minutes;
       let reviewReason = deterministic.reason;
+      if (evidenceVerified && action !== 'suspend') {
+        action = 'suspend';
+        minutes = 90;
+        reviewReason = 'Reported statement verified in recent chat logs';
+      }
+      let attemptedSuspendWrite = false;
+      let suspendWriteFailed = false;
       try {
         ensureGlobalBotProfile().catch(() => {});
         ensureBotMembership(PUBLIC_SERVER_ID).catch(() => {});
@@ -1241,6 +1270,7 @@
       }
       if (action === 'suspend' && minutes > 0) {
         try {
+          attemptedSuspendWrite = true;
           const appliedMinutes = Math.max(1, minutes);
           const untilMs = Date.now() + (appliedMinutes * 60 * 1000);
           await setDoc(suspensionRef, {
@@ -1254,8 +1284,13 @@
           await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, `Report reviewed: user suspended for ${appliedMinutes} minute(s). Reason: ${String(reviewReason || 'Policy violation').slice(0, 180)}`);
           return;
         } catch (err) {
+          suspendWriteFailed = true;
           if (DEBUG_MODE) console.error('Public suspension write failed', err);
         }
+      }
+      if (attemptedSuspendWrite && suspendWriteFailed) {
+        await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, 'Report reviewed: suspension decision made, but applying suspension failed (rules/config).');
+        return;
       }
       try {
         const postCheck = await getDoc(suspensionRef);
