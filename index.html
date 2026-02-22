@@ -227,6 +227,7 @@
     let openReports = {};
     let lastSuspensionNoticeKey = '';
     let isHandlingPublicSuspensionRedirect = false;
+    let lastSafeBriefingKey = '';
     let serversLoadVersion = 0;
     let membersLoadVersion = 0;
     let presenceInterval = null;
@@ -946,6 +947,65 @@
       return serverRef.id;
     }
 
+    async function getSafeChatChannelId(serverId) {
+      if (!serverId) return '';
+      try {
+        const snap = await getDocs(query(collection(db, 'channels'), where('serverId', '==', serverId), limit(10)));
+        const match = snap.docs.find(d => (d.data()?.name || '') === 'safe-chat') || snap.docs[0];
+        return match?.id || '';
+      } catch (_) {
+        return '';
+      }
+    }
+
+    async function sendSafeChatSuspensionBriefing(safeServerId, suspension) {
+      if (!safeServerId || !currentUser?.uid) return;
+      const untilMs = Number(suspension?.untilMs || 0);
+      const briefKey = `${currentUser.uid}:${untilMs}`;
+      if (briefKey && briefKey === lastSafeBriefingKey) return;
+      lastSafeBriefingKey = briefKey;
+      const channelId = await getSafeChatChannelId(safeServerId);
+      if (!channelId) return;
+      let recentReports = [];
+      try {
+        const repSnap = await getDocs(query(
+          collection(db, 'reports'),
+          where('serverId', '==', PUBLIC_SERVER_ID),
+          where('reportedUserId', '==', currentUser.uid),
+          limit(20)
+        ));
+        recentReports = repSnap.docs
+          .map(d => ({ id: d.id, ...(d.data() || {}) }))
+          .sort((a, b) => {
+            const at = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : 0;
+            const bt = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0;
+            return bt - at;
+          })
+          .slice(0, 3);
+      } catch (_) {}
+      const reason = String(suspension?.reason || 'Policy violation').replace(/^\[BOT-AUTO\]\s*/i, '').trim();
+      const ends = untilMs ? new Date(untilMs).toLocaleString() : 'Unknown';
+      const reportLines = recentReports.length
+        ? recentReports.map((r, i) => `- Report ${i + 1}: ${String(r.reason || 'Other')} | ${String(r.details || 'No details').slice(0, 120)}`).join('\n')
+        : '- No specific report text was found.';
+      const msg = [
+        `You were suspended from Public.`,
+        `Reason: ${reason || 'Policy violation'}`,
+        `Suspension ends: ${ends}`,
+        '',
+        'Recent report context:',
+        reportLines,
+        '',
+        'Tips to avoid future reports:',
+        '- Avoid insults, slurs, threats, and harassment.',
+        '- Don\'t spam repeated messages or links.',
+        '- Keep disagreements civil and factual.',
+        '- If a conversation escalates, pause and cool down.',
+        '- Ask for clarification instead of assuming bad intent.'
+      ].join('\n');
+      await sendBotMessage(safeServerId, channelId, msg);
+    }
+
     async function redirectSuspendedUserFromPublic(suspension) {
       if (isHandlingPublicSuspensionRedirect) return;
       isHandlingPublicSuspensionRedirect = true;
@@ -953,6 +1013,7 @@
         showSuspensionLockModal(servers[PUBLIC_SERVER_ID]?.name || 'Public', suspension);
         const safeServerId = await ensureSafeChatServerForSuspendedUser();
         if (safeServerId) {
+          await sendSafeChatSuspensionBriefing(safeServerId, suspension);
           currentServerId = null;
           currentChannelId = null;
           renderChannelList();
@@ -1369,7 +1430,7 @@
           temperature: 0.6,
           max_tokens: 450,
           messages: [
-            { role: 'system', content: `You are a concise Discord assistant bot. Use clean formatting. If listing items, use clear bullets or numbering. Only mention these supported commands if asked: ${BOT_COMMAND_HELP.join(' | ')}. Never suggest commands outside this list.` },
+            { role: 'system', content: `You are a concise chat assistant. Do not mention Discord, slash-command ecosystems, or platform-specific features. Use clean formatting. If listing items, use clear bullets or numbering. Only mention these supported commands if asked: ${BOT_COMMAND_HELP.join(' | ')}. Never suggest commands outside this list.` },
             { role: 'system', content: `User memory:\n${memoryText}` },
             { role: 'user', content: prompt }
           ]
