@@ -1171,6 +1171,7 @@
       if (!reportId || !reportData || currentServerId !== PUBLIC_SERVER_ID) return;
       const reportedUserId = reportData.reportedUserId;
       if (!reportedUserId || reportedUserId === BOT_USER_ID) return;
+      const suspensionRef = doc(db, 'servers', PUBLIC_SERVER_ID, 'suspended', reportedUserId);
       const reason = String(reportData.reason || 'Other');
       const details = String(reportData.details || '');
       const targetChannelId = currentChannelId || (Object.values(channels).find(c => c.serverId === PUBLIC_SERVER_ID)?.id || '');
@@ -1242,7 +1243,7 @@
         try {
           const appliedMinutes = Math.max(1, minutes);
           const untilMs = Date.now() + (appliedMinutes * 60 * 1000);
-          await setDoc(doc(db, 'servers', PUBLIC_SERVER_ID, 'suspended', reportedUserId), {
+          await setDoc(suspensionRef, {
             userId: reportedUserId,
             reason: `[BOT-AUTO] ${String(reviewReason || 'Policy violation').slice(0, 180)}`,
             reviewSource: 'public-report-bot',
@@ -1256,6 +1257,14 @@
           if (DEBUG_MODE) console.error('Public suspension write failed', err);
         }
       }
+      try {
+        const postCheck = await getDoc(suspensionRef);
+        const untilMs = postCheck.exists() ? Number(postCheck.data()?.untilMs || 0) : 0;
+        if (untilMs > Date.now()) {
+          await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, 'Report reviewed: user is already suspended.');
+          return;
+        }
+      } catch (_) {}
       await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, 'Report reviewed: no suspension applied.');
     }
 
