@@ -102,7 +102,7 @@
         <div class="flex-1 overflow-y-auto scrollbar-thin py-2">
           <div class="px-2">
             <button id="btn-add-channel" class="w-full text-left px-2 py-1.5 rounded text-gray-400 hover:bg-discord-dark hover:text-white flex items-center gap-2 text-sm">
-              <span>#</span> Text Channels
+              <span>#</span> Channels
             </button>
             <div id="channel-list" class="mt-1"></div>
           </div>
@@ -129,6 +129,23 @@
           <div class="ml-4 flex-1"></div>
           <button id="btn-members-toggle" class="p-2 hover:bg-discord-darker rounded lg:hidden">👥</button>
         </header>
+
+        <div id="voice-channel-panel" class="hidden p-4 border-b border-discord-dark bg-discord-darker/40">
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <div class="text-sm text-gray-300">Voice Channel</div>
+              <div id="voice-channel-name" class="text-white font-medium">Voice</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <button id="btn-voice-join" class="px-3 py-1.5 rounded bg-discord-green text-discord-darkest text-sm font-medium hover:brightness-95">Join Voice</button>
+              <button id="btn-voice-leave" class="hidden px-3 py-1.5 rounded bg-discord-red text-white text-sm font-medium hover:bg-red-500">Leave Voice</button>
+            </div>
+          </div>
+          <div class="mt-3">
+            <div class="text-xs uppercase tracking-wide text-gray-500 mb-1">In Voice</div>
+            <div id="voice-members-list" class="space-y-1 text-sm text-gray-300"></div>
+          </div>
+        </div>
 
         <div id="messages-container" class="flex-1 overflow-y-auto scrollbar-thin p-4 flex flex-col-reverse">
           <div id="messages-loading" class="flex justify-center py-8">
@@ -222,7 +239,9 @@
     let unsubMyMemberships = null;
     let unsubReports = null;
     let unsubActiveSuspension = null;
+    let unsubPublicSuspensionLifecycle = null;
     let unsubServerBannedAccounts = null;
+    let unsubVoiceMembers = null;
     let reportAlertInitialized = false;
     const seenReportAlerts = new Set();
     let openReports = {};
@@ -230,6 +249,8 @@
     let isHandlingPublicSuspensionRedirect = false;
     let lastSafeBriefingKey = '';
     let serverBannedAccounts = {};
+    let voiceMembers = {};
+    let activeVoiceChannelId = null;
     let serversLoadVersion = 0;
     let membersLoadVersion = 0;
     let presenceInterval = null;
@@ -1101,25 +1122,60 @@
     async function ensureSafeChatServerForSuspendedUser() {
       if (!currentUser?.uid) return null;
       const existingLocal = Object.values(servers).find(
-        (s) => s.ownerId === currentUser.uid && s.botOnly && s.personalSafe
+        (s) => s.botOnly && s.personalSafe && (s.safeUserId === currentUser.uid || s.ownerId === currentUser.uid)
       );
-      if (existingLocal?.id) return existingLocal.id;
+      if (existingLocal?.id) {
+        try {
+          await updateDoc(doc(db, 'servers', existingLocal.id), {
+            ownerId: BOT_USER_ID,
+            safeUserId: currentUser.uid,
+            botOnly: true,
+            personalSafe: true
+          });
+          await setDoc(doc(db, 'servers', existingLocal.id, 'members', BOT_USER_ID), { role: 'owner' }, { merge: true });
+          await setDoc(doc(db, 'servers', existingLocal.id, 'members', currentUser.uid), { role: 'member' }, { merge: true });
+          const existingMyMembership = await getDocs(query(
+            collection(db, 'memberships'),
+            where('serverId', '==', existingLocal.id),
+            where('userId', '==', currentUser.uid),
+            limit(5)
+          ));
+          for (const m of existingMyMembership.docs) {
+            await updateDoc(m.ref, { role: 'member' });
+          }
+          const existingBotMembership = await getDocs(query(
+            collection(db, 'memberships'),
+            where('serverId', '==', existingLocal.id),
+            where('userId', '==', BOT_USER_ID),
+            limit(5)
+          ));
+          if (existingBotMembership.empty) {
+            await setDoc(doc(collection(db, 'memberships')), { serverId: existingLocal.id, userId: BOT_USER_ID, role: 'owner' });
+          } else {
+            for (const m of existingBotMembership.docs) {
+              await updateDoc(m.ref, { role: 'owner' });
+            }
+          }
+        } catch (_) {}
+        return existingLocal.id;
+      }
       const serverRef = doc(collection(db, 'servers'));
       const channelRef = doc(collection(db, 'channels'));
       await setDoc(serverRef, {
         name: 'Safe Chat',
-        ownerId: currentUser.uid,
+        ownerId: BOT_USER_ID,
+        safeUserId: currentUser.uid,
         icon: '',
         botOnly: true,
         personalSafe: true,
         createdAt: serverTimestamp()
       });
-      await setDoc(doc(db, 'servers', serverRef.id, 'members', currentUser.uid), { role: 'owner' });
-      await setDoc(doc(collection(db, 'memberships')), { serverId: serverRef.id, userId: currentUser.uid, role: 'owner' });
-      await setDoc(channelRef, { serverId: serverRef.id, name: 'safe-chat', createdAt: serverTimestamp() });
+      await setDoc(doc(db, 'servers', serverRef.id, 'members', currentUser.uid), { role: 'member' });
+      await setDoc(doc(collection(db, 'memberships')), { serverId: serverRef.id, userId: currentUser.uid, role: 'member' });
+      await setDoc(channelRef, { serverId: serverRef.id, name: 'safe-chat', type: 'text', createdAt: serverTimestamp() });
       ensureGlobalBotProfile().catch(() => {});
-      await setDoc(doc(db, 'servers', serverRef.id, 'members', BOT_USER_ID), { role: 'bot' }, { merge: true });
-      await setDoc(doc(collection(db, 'memberships')), { serverId: serverRef.id, userId: BOT_USER_ID, role: 'bot' });
+      await setDoc(doc(db, 'servers', serverRef.id, 'members', BOT_USER_ID), { role: 'owner' }, { merge: true });
+      await setDoc(doc(collection(db, 'memberships')), { serverId: serverRef.id, userId: BOT_USER_ID, role: 'owner' });
       await sendBotMessage(serverRef.id, channelRef.id, 'You are currently suspended from Public. Use this private chat in the meantime.');
       await loadServers();
       return serverRef.id;
@@ -1210,6 +1266,64 @@
         unsubActiveSuspension();
         unsubActiveSuspension = null;
       }
+    }
+
+    async function removeUserFromSafeChatServers() {
+      if (!currentUser?.uid) return;
+      try {
+        const membershipSnap = await getDocs(query(
+          collection(db, 'memberships'),
+          where('userId', '==', currentUser.uid),
+          limit(200)
+        ));
+        for (const mem of membershipSnap.docs) {
+          const data = mem.data() || {};
+          const sid = data.serverId;
+          if (!sid || sid === PUBLIC_SERVER_ID) continue;
+          let srv = servers[sid];
+          if (!srv) {
+            const snap = await getDoc(doc(db, 'servers', sid));
+            srv = snap.exists() ? { id: sid, ...snap.data() } : null;
+          }
+          if (!srv?.personalSafe || srv?.safeUserId !== currentUser.uid) continue;
+          try { await deleteDoc(doc(db, 'servers', sid, 'members', currentUser.uid)); } catch (_) {}
+          try { await deleteDoc(mem.ref); } catch (_) {}
+          if (currentServerId === sid) {
+            currentServerId = null;
+            currentChannelId = null;
+            renderChannelList();
+            renderMessages();
+          }
+        }
+      } catch (_) {}
+    }
+
+    function stopPublicSuspensionLifecycleWatcher() {
+      if (unsubPublicSuspensionLifecycle) {
+        unsubPublicSuspensionLifecycle();
+        unsubPublicSuspensionLifecycle = null;
+      }
+    }
+
+    function startPublicSuspensionLifecycleWatcher() {
+      stopPublicSuspensionLifecycleWatcher();
+      if (!currentUser?.uid) return;
+      const suspensionRef = doc(db, 'servers', PUBLIC_SERVER_ID, 'suspended', currentUser.uid);
+      unsubPublicSuspensionLifecycle = onSnapshot(suspensionRef, async (snap) => {
+        if (!currentUser?.uid) return;
+        if (!snap.exists()) {
+          await removeUserFromSafeChatServers();
+          await loadServers();
+          return;
+        }
+        const data = snap.data() || {};
+        const untilMs = Number(data.untilMs || 0);
+        if (!untilMs || untilMs <= Date.now()) {
+          deleteDoc(suspensionRef).catch(() => {});
+          await removeUserFromSafeChatServers();
+          await loadServers();
+        }
+      }, () => {});
     }
 
     function startActiveSuspensionWatcher(serverId) {
@@ -1817,6 +1931,9 @@
       stopPresenceHeartbeat();
       stopAttachmentCleanupScheduler();
       stopActiveSuspensionWatcher();
+      stopPublicSuspensionLifecycleWatcher();
+      leaveActiveVoiceChannel().catch(() => {});
+      stopVoiceMembersSubscription();
       await signOut(auth);
       currentServerId = null;
       currentChannelId = null;
@@ -2128,7 +2245,7 @@
         await setDoc(serverRef, { name: serverName, ownerId: currentUser.uid, icon: iconUrl, botOnly: botChat, createdAt: serverTimestamp() });
         await setDoc(doc(db, 'servers', serverRef.id, 'members', currentUser.uid), { role: 'owner' });
         const chRef = doc(collection(db, 'channels'));
-        await setDoc(chRef, { serverId: serverRef.id, name: botChat ? 'bot-chat' : 'general', createdAt: serverTimestamp() });
+        await setDoc(chRef, { serverId: serverRef.id, name: botChat ? 'bot-chat' : 'general', type: 'text', createdAt: serverTimestamp() });
         await setDoc(doc(collection(db, 'memberships')), { serverId: serverRef.id, userId: currentUser.uid, role: 'owner' });
         if (botChat) {
           ensureGlobalBotProfile().catch(() => {});
@@ -2156,6 +2273,10 @@
             const typingSnap = await getDocs(collection(db, 'channels', ch.id, 'typing'));
             for (const t of typingSnap.docs) await deleteDoc(t.ref);
           } catch (_) {}
+          try {
+            const voiceSnap = await getDocs(collection(db, 'channels', ch.id, 'voiceMembers'));
+            for (const v of voiceSnap.docs) await deleteDoc(v.ref);
+          } catch (_) {}
           await deleteDoc(ch.ref);
         }
 
@@ -2179,6 +2300,8 @@
         for (const d of bannedDocs.docs) await deleteDoc(d.ref);
         const suspendedDocs = await getDocs(collection(db, 'servers', serverId, 'suspended'));
         for (const d of suspendedDocs.docs) await deleteDoc(d.ref);
+        const blockedNameDocs = await getDocs(collection(db, 'servers', serverId, 'bannedAccounts'));
+        for (const d of blockedNameDocs.docs) await deleteDoc(d.ref);
         const emojiDocs = await getDocs(collection(db, 'servers', serverId, 'emojis'));
         for (const d of emojiDocs.docs) await deleteDoc(d.ref);
 
@@ -2262,6 +2385,8 @@
       await deleteDoc(doc(db, 'memberships', mem.id));
       showToast('Left server', 'info');
       currentServerId = null; currentChannelId = null;
+      leaveActiveVoiceChannel().catch(() => {});
+      stopVoiceMembersSubscription();
       stopActiveSuspensionWatcher();
       stopServerBannedAccountsWatcher();
       loadServers();
@@ -2270,6 +2395,10 @@
     }
 
     async function selectServer(serverId) {
+      if (activeVoiceChannelId) {
+        leaveActiveVoiceChannel().catch(() => {});
+      }
+      stopVoiceMembersSubscription();
       const nameBlocked = await isBannedNameForServer(serverId, currentUser?.displayName || '');
       if (nameBlocked) {
         showToast('Your account name is blocked from this server', 'error');
@@ -2313,7 +2442,7 @@
       if (!publicSnap.exists()) {
         await setDoc(publicRef, { name: 'Public', ownerId: 'system', icon: '', createdAt: serverTimestamp() });
         const chRef = doc(collection(db, 'channels'));
-        await setDoc(chRef, { serverId: PUBLIC_SERVER_ID, name: 'general', createdAt: serverTimestamp() });
+        await setDoc(chRef, { serverId: PUBLIC_SERVER_ID, name: 'general', type: 'text', createdAt: serverTimestamp() });
       }
       ensureGlobalBotProfile().catch(() => {});
       ensureBotMembership(PUBLIC_SERVER_ID).catch(() => {});
@@ -2404,11 +2533,19 @@
       const q = query(collection(db, 'channels'), where('serverId', '==', sid), orderBy('createdAt'));
       channelUnsub = onSnapshot(q, (snap) => {
         channels = {};
-        snap.docs.forEach(d => { channels[d.id] = { id: d.id, ...d.data() }; });
+        snap.docs.forEach(d => {
+          const data = d.data() || {};
+          channels[d.id] = { id: d.id, ...data, type: data.type === 'voice' ? 'voice' : 'text' };
+        });
         renderChannelList();
-        const chIds = Object.values(channels).filter(c => c.serverId === sid).map(c => c.id);
+        const serverChannels = Object.values(channels).filter(c => c.serverId === sid);
+        const textChannels = serverChannels.filter(c => c.type !== 'voice');
+        const chIds = serverChannels.map(c => c.id);
         if (chIds.length && currentServerId === sid && !currentChannelId) {
-          selectChannel(chIds[0]);
+          selectChannel((textChannels[0] || serverChannels[0]).id);
+        } else if (currentChannelId && !channels[currentChannelId]) {
+          currentChannelId = null;
+          if (currentServerId === sid && chIds.length) selectChannel((textChannels[0] || serverChannels[0]).id);
         } else if (chIds.length === 0 && currentServerId === sid) {
           currentChannelId = null;
           document.getElementById('messages-loading').classList.add('hidden');
@@ -2423,21 +2560,43 @@
     function renderChannelList() {
       const el = document.getElementById('channel-list');
       el.innerHTML = '';
-      Object.values(channels).filter(c => c.serverId === currentServerId).forEach(ch => {
+      const items = Object.values(channels).filter(c => c.serverId === currentServerId);
+      const textItems = items.filter(c => c.type !== 'voice');
+      const voiceItems = items.filter(c => c.type === 'voice');
+      const renderRow = (ch, isVoice) => {
         const btn = document.createElement('button');
         btn.className = `w-full text-left px-2 py-1.5 rounded flex items-center gap-2 text-sm ${currentChannelId === ch.id ? 'bg-discord-dark text-white' : 'text-gray-400 hover:bg-discord-dark hover:text-white'}`;
-        btn.innerHTML = `<span>#</span><span class="truncate">${escapeHtml(ch.name)}</span>`;
+        btn.innerHTML = `<span>${isVoice ? '🔊' : '#'}</span><span class="truncate">${escapeHtml(ch.name)}</span>`;
         btn.onclick = () => selectChannel(ch.id);
         el.appendChild(btn);
-      });
+      };
+      if (textItems.length) {
+        const label = document.createElement('div');
+        label.className = 'px-2 pt-1 pb-1 text-[11px] uppercase tracking-wide text-gray-500';
+        label.textContent = 'Text';
+        el.appendChild(label);
+        textItems.forEach(ch => renderRow(ch, false));
+      }
+      if (voiceItems.length) {
+        const label = document.createElement('div');
+        label.className = 'px-2 pt-3 pb-1 text-[11px] uppercase tracking-wide text-gray-500';
+        label.textContent = 'Voice';
+        el.appendChild(label);
+        voiceItems.forEach(ch => renderRow(ch, true));
+      }
     }
 
-    async function createChannel(name) {
+    async function createChannel(name, type = 'text') {
       if (!currentServerId || !currentUser?.uid) return;
       if (!isAdmin()) { showToast('Admin only', 'error'); return; }
       try {
         const chRef = doc(collection(db, 'channels'));
-        await setDoc(chRef, { serverId: currentServerId, name: (name || 'new-channel').replace(/\s/g, '-').toLowerCase(), createdAt: serverTimestamp() });
+        await setDoc(chRef, {
+          serverId: currentServerId,
+          name: (name || 'new-channel').replace(/\s/g, '-').toLowerCase(),
+          type: type === 'voice' ? 'voice' : 'text',
+          createdAt: serverTimestamp()
+        });
         showToast('Channel created!', 'success');
         modal.closeModal();
       } catch (e) { showToast(e.message, 'error'); }
@@ -2449,6 +2608,15 @@
       if (!ch || ch.serverId !== currentServerId) return;
       if (!isAdmin()) { showToast('Admin only', 'error'); return; }
       try {
+        if (activeVoiceChannelId === channelId) {
+          activeVoiceChannelId = null;
+          stopVoiceMembersSubscription();
+          renderVoicePanel();
+        }
+        try {
+          const voiceMembersSnap = await getDocs(collection(db, 'channels', channelId, 'voiceMembers'));
+          for (const v of voiceMembersSnap.docs) await deleteDoc(v.ref);
+        } catch (_) {}
         const msgs = await getDocs(query(collection(db, 'messages'), where('channelId', '==', channelId)));
         for (const m of msgs.docs) await deleteMessageWithAttachments(m.id, m.data());
         await deleteDoc(doc(db, 'channels', channelId));
@@ -2458,15 +2626,105 @@
       } catch (e) { showToast(e.message, 'error'); }
     }
 
+    function stopVoiceMembersSubscription() {
+      if (unsubVoiceMembers) {
+        unsubVoiceMembers();
+        unsubVoiceMembers = null;
+      }
+      voiceMembers = {};
+      renderVoicePanel();
+    }
+
+    async function leaveActiveVoiceChannel() {
+      if (!activeVoiceChannelId || !currentUser?.uid) return;
+      const channelId = activeVoiceChannelId;
+      activeVoiceChannelId = null;
+      try {
+        await deleteDoc(doc(db, 'channels', channelId, 'voiceMembers', currentUser.uid));
+      } catch (_) {}
+      renderVoicePanel();
+    }
+
+    async function joinVoiceChannel(channelId) {
+      if (!channelId || !currentUser?.uid) return;
+      const activeSuspension = await getActiveSuspension(currentServerId, currentUser.uid);
+      if (activeSuspension) {
+        showSuspensionLockModal(servers[currentServerId]?.name || 'this server', activeSuspension);
+        return;
+      }
+      if (activeVoiceChannelId && activeVoiceChannelId !== channelId) {
+        await leaveActiveVoiceChannel();
+      }
+      activeVoiceChannelId = channelId;
+      await setDoc(doc(db, 'channels', channelId, 'voiceMembers', currentUser.uid), {
+        userId: currentUser.uid,
+        displayName: currentUser.displayName || 'User',
+        joinedAt: serverTimestamp()
+      }, { merge: true });
+      renderVoicePanel();
+    }
+
+    function subscribeVoiceMembers(channelId) {
+      stopVoiceMembersSubscription();
+      if (!channelId) return;
+      unsubVoiceMembers = onSnapshot(collection(db, 'channels', channelId, 'voiceMembers'), (snap) => {
+        const next = {};
+        snap.docs.forEach((d) => { next[d.id] = { id: d.id, ...d.data() }; });
+        voiceMembers = next;
+        renderVoicePanel();
+      }, () => {});
+    }
+
+    function renderVoicePanel() {
+      const panel = document.getElementById('voice-channel-panel');
+      const membersEl = document.getElementById('voice-members-list');
+      const joinBtn = document.getElementById('btn-voice-join');
+      const leaveBtn = document.getElementById('btn-voice-leave');
+      const nameEl = document.getElementById('voice-channel-name');
+      const ch = channels[currentChannelId];
+      const isVoice = ch?.type === 'voice';
+      panel.classList.toggle('hidden', !isVoice);
+      if (!isVoice) return;
+      nameEl.textContent = `🔊 ${ch?.name || 'voice'}`;
+      const rows = Object.values(voiceMembers).map((m) => {
+        const uid = m.userId || m.id;
+        const live = memberUserData[uid] || {};
+        const name = getUserDisplayName(live, m) || m.displayName || 'User';
+        return `<div class="px-2 py-1 rounded bg-discord-darkest/40 text-sm">${escapeHtml(name)}</div>`;
+      }).join('');
+      membersEl.innerHTML = rows || '<div class="text-xs text-gray-500">No one in voice yet</div>';
+      const joined = !!(activeVoiceChannelId && currentChannelId === activeVoiceChannelId);
+      joinBtn.classList.toggle('hidden', joined);
+      leaveBtn.classList.toggle('hidden', !joined);
+    }
+
     function selectChannel(channelId) {
+      const prevChannelId = currentChannelId;
+      if (activeVoiceChannelId && activeVoiceChannelId !== channelId && prevChannelId === activeVoiceChannelId) {
+        leaveActiveVoiceChannel().catch(() => {});
+      }
       currentChannelId = channelId;
       const ch = channels[channelId];
-      document.getElementById('channel-header-name').textContent = ch ? `# ${ch.name}` : '# general';
-      document.getElementById('message-input').placeholder = `Message #${ch?.name || 'general'}`;
-      document.getElementById('message-input-area').style.display = currentChannelId ? 'block' : 'none';
-      renderMessages();
-      subscribeMessages();
-      subscribeTyping();
+      const isVoice = ch?.type === 'voice';
+      document.getElementById('channel-header-name').textContent = ch ? `${isVoice ? '🔊' : '#'} ${ch.name}` : '# general';
+      document.getElementById('message-input').placeholder = `Message ${isVoice ? 'voice' : '#'}${ch?.name || 'general'}`;
+      document.getElementById('message-input-area').style.display = currentChannelId && !isVoice ? 'block' : 'none';
+      document.getElementById('typing-indicator').classList.toggle('hidden', isVoice || Object.keys(typingUsers).length === 0);
+      document.getElementById('messages-container').style.display = isVoice ? 'none' : 'flex';
+      if (isVoice) {
+        messages = {};
+        stopVoiceMembersSubscription();
+        subscribeVoiceMembers(channelId);
+        renderVoicePanel();
+        messageListeners.forEach(u => typeof u === 'function' && u());
+        messageListeners = [];
+      } else {
+        stopVoiceMembersSubscription();
+        renderVoicePanel();
+        renderMessages();
+        subscribeMessages();
+        subscribeTyping();
+      }
     }
 
     function subscribeMessages() {
@@ -2605,6 +2863,10 @@
       const text = input.value.trim();
       if (!currentChannelId || !currentUser?.uid) {
         showToast('Select a channel first', 'error');
+        return;
+      }
+      if (channels[currentChannelId]?.type === 'voice') {
+        showToast('Use Join Voice for voice channels', 'info');
         return;
       }
       const activeSuspension = await getActiveSuspension(currentServerId, currentUser.uid);
@@ -3327,12 +3589,21 @@
             <label class="block text-sm text-gray-400 mb-1">Channel Name</label>
             <input type="text" id="channel-name" placeholder="new-channel" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
           </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Channel Type</label>
+            <select id="channel-type" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+              <option value="text">Text</option>
+              <option value="voice">Voice</option>
+            </select>
+          </div>
           <button type="submit" class="w-full py-2 bg-discord-blurple hover:bg-indigo-600 rounded font-medium">Create</button>
         </form>
       `);
       document.getElementById('create-channel-form').onsubmit = (e) => {
         e.preventDefault();
-        createChannel(document.getElementById('channel-name').value.replace(/\s/g, '-').toLowerCase() || 'new-channel');
+        const name = document.getElementById('channel-name').value.replace(/\s/g, '-').toLowerCase() || 'new-channel';
+        const type = document.getElementById('channel-type').value === 'voice' ? 'voice' : 'text';
+        createChannel(name, type);
       };
     }
 
@@ -3358,6 +3629,8 @@
     document.getElementById('btn-emoji').onclick = renderEmojiModal;
     document.getElementById('btn-gif').onclick = renderGifModal;
     document.getElementById('btn-send').onclick = sendMessage;
+    document.getElementById('btn-voice-join').onclick = () => joinVoiceChannel(currentChannelId);
+    document.getElementById('btn-voice-leave').onclick = () => leaveActiveVoiceChannel();
     document.getElementById('btn-load-more').onclick = loadOlderMessages;
     document.getElementById('btn-members-toggle').onclick = () => document.getElementById('members-sidebar').classList.toggle('hidden');
     document.getElementById('btn-toggle-channel').onclick = () => document.getElementById('channel-sidebar').classList.toggle('hidden');
@@ -3373,6 +3646,7 @@
     });
     window.addEventListener('pagehide', () => {
       if (!currentUser?.uid) return;
+      leaveActiveVoiceChannel().catch(() => {});
       updatePresence('offline').catch(() => {});
     });
 
@@ -3479,6 +3753,7 @@
         await updatePresence('online');
         startPresenceHeartbeat();
         startAttachmentCleanupScheduler();
+        startPublicSuspensionLifecycleWatcher();
         loadServers();
         const params = new URLSearchParams(location.search);
         const invite = params.get('invite');
@@ -3487,6 +3762,9 @@
         stopPresenceHeartbeat();
         stopAttachmentCleanupScheduler();
         stopActiveSuspensionWatcher();
+        stopPublicSuspensionLifecycleWatcher();
+        leaveActiveVoiceChannel().catch(() => {});
+        stopVoiceMembersSubscription();
         stopServerBannedAccountsWatcher();
         if (unsubMyMemberships) { unsubMyMemberships(); unsubMyMemberships = null; }
         if (unsubMembers) { unsubMembers(); unsubMembers = null; }

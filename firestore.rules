@@ -10,6 +10,11 @@ service cloud.firestore {
         (exists(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)) &&
          get(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)).data.role in ['owner', 'admin']);
     }
+    function isChannelServerAdmin(channelId) {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/channels/$(channelId)) &&
+        isServerAdmin(get(/databases/$(database)/documents/channels/$(channelId)).data.serverId);
+    }
 
     match /users/{userId} {
       allow read: if request.auth != null;
@@ -81,6 +86,11 @@ service cloud.firestore {
 
     match /channels/{channelId}/typing/{typingId} {
       allow read, write: if request.auth != null;
+    }
+    match /channels/{channelId}/voiceMembers/{memberId} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null &&
+        (request.auth.uid == memberId || isChannelServerAdmin(channelId));
     }
 
     match /servers/{serverId}/emojis/{emojiId} {
