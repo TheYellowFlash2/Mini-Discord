@@ -291,6 +291,11 @@
     let voiceSignalUnsubs = {};
     let handledVoiceSignalsByPeer = {};
     let remoteVoiceAudioEls = {};
+    let unreadCountsByChannel = {};
+    let lastReadByChannel = {};
+    let unreadChannelUnsubs = {};
+    let unreadServerChannelUnsubs = {};
+    let knownChannelsByServer = {};
     let serversLoadVersion = 0;
     let membersLoadVersion = 0;
     let presenceInterval = null;
@@ -343,6 +348,7 @@
     let activeMemberProfileUserId = null;
     let contextMenuMessage = null;
     const NOTIFICATION_PREF_KEY = 'mini_discord_notifications_enabled';
+    const CHANNEL_READ_PREF_KEY = 'mini_discord_channel_last_read';
     let notificationsEnabled = localStorage.getItem(NOTIFICATION_PREF_KEY) === 'true';
     const REPORT_REASONS = ['Harassment', 'Spam', 'Hate Speech', 'Threats', 'Impersonation', 'Other'];
     const BOT_MEMORY_LIMIT = 6;
@@ -411,6 +417,121 @@
     function debounce(fn, ms) {
       let t;
       return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    }
+
+    function getChannelReadStorageKey() {
+      return `${CHANNEL_READ_PREF_KEY}:${currentUser?.uid || 'anon'}`;
+    }
+
+    function loadChannelReadState() {
+      try {
+        const raw = localStorage.getItem(getChannelReadStorageKey());
+        const parsed = raw ? JSON.parse(raw) : {};
+        lastReadByChannel = parsed && typeof parsed === 'object' ? parsed : {};
+      } catch (_) {
+        lastReadByChannel = {};
+      }
+    }
+
+    function persistChannelReadState() {
+      try {
+        localStorage.setItem(getChannelReadStorageKey(), JSON.stringify(lastReadByChannel));
+      } catch (_) {}
+    }
+
+    function getChannelLastReadAt(channelId) {
+      const n = Number(lastReadByChannel[channelId] || 0);
+      return Number.isFinite(n) ? n : 0;
+    }
+
+    function getServerUnreadCount(serverId) {
+      const channelIds = knownChannelsByServer[serverId] || [];
+      return channelIds.reduce((sum, cid) => sum + Number(unreadCountsByChannel[cid] || 0), 0);
+    }
+
+    function markChannelRead(channelId) {
+      if (!channelId) return;
+      lastReadByChannel[channelId] = Date.now();
+      unreadCountsByChannel[channelId] = 0;
+      persistChannelReadState();
+      renderChannelList();
+      renderServerList();
+    }
+
+    function stopUnreadTracking() {
+      Object.values(unreadChannelUnsubs).forEach((u) => { if (typeof u === 'function') u(); });
+      Object.values(unreadServerChannelUnsubs).forEach((u) => { if (typeof u === 'function') u(); });
+      unreadChannelUnsubs = {};
+      unreadServerChannelUnsubs = {};
+      unreadCountsByChannel = {};
+      knownChannelsByServer = {};
+    }
+
+    function startUnreadChannelListener(serverId, channelId) {
+      if (!serverId || !channelId || unreadChannelUnsubs[channelId]) return;
+      const q = query(
+        collection(db, 'messages'),
+        where('channelId', '==', channelId),
+        orderBy('createdAt', 'desc'),
+        limit(200)
+      );
+      unreadChannelUnsubs[channelId] = onSnapshot(q, (snap) => {
+        const isOpen = currentServerId === serverId && currentChannelId === channelId;
+        if (isOpen) {
+          unreadCountsByChannel[channelId] = 0;
+          renderChannelList();
+          renderServerList();
+          return;
+        }
+        const lastReadAt = getChannelLastReadAt(channelId);
+        const count = snap.docs.filter((d) => {
+          const ms = d.data()?.createdAt?.toDate ? d.data().createdAt.toDate().getTime() : 0;
+          return ms > lastReadAt;
+        }).length;
+        unreadCountsByChannel[channelId] = count;
+        renderChannelList();
+        renderServerList();
+      }, () => {});
+    }
+
+    function syncUnreadTracking() {
+      if (!currentUser?.uid) return;
+      const activeServerIds = new Set(Object.keys(servers));
+      Object.keys(unreadServerChannelUnsubs).forEach((sid) => {
+        if (!activeServerIds.has(sid)) {
+          unreadServerChannelUnsubs[sid]();
+          delete unreadServerChannelUnsubs[sid];
+          const cids = knownChannelsByServer[sid] || [];
+          cids.forEach((cid) => {
+            if (unreadChannelUnsubs[cid]) {
+              unreadChannelUnsubs[cid]();
+              delete unreadChannelUnsubs[cid];
+            }
+            delete unreadCountsByChannel[cid];
+          });
+          delete knownChannelsByServer[sid];
+        }
+      });
+      activeServerIds.forEach((sid) => {
+        if (unreadServerChannelUnsubs[sid]) return;
+        const q = query(collection(db, 'channels'), where('serverId', '==', sid), orderBy('createdAt'));
+        unreadServerChannelUnsubs[sid] = onSnapshot(q, (snap) => {
+          const prevIds = knownChannelsByServer[sid] || [];
+          const nextIds = snap.docs.map((d) => d.id);
+          knownChannelsByServer[sid] = nextIds;
+          nextIds.forEach((cid) => startUnreadChannelListener(sid, cid));
+          prevIds.forEach((cid) => {
+            if (nextIds.includes(cid)) return;
+            if (unreadChannelUnsubs[cid]) {
+              unreadChannelUnsubs[cid]();
+              delete unreadChannelUnsubs[cid];
+            }
+            delete unreadCountsByChannel[cid];
+          });
+          renderChannelList();
+          renderServerList();
+        }, () => {});
+      });
     }
 
     function notificationsSupported() {
@@ -2539,6 +2660,7 @@
         });
         servers = nextServers;
         members = nextMembers;
+        syncUnreadTracking();
         renderServerList();
         if (currentServerId && !servers[currentServerId]) {
           currentServerId = null;
@@ -2562,13 +2684,23 @@
       el.innerHTML = '';
       const sorted = Object.values(servers).sort((a, b) => (a.id === PUBLIC_SERVER_ID ? -1 : b.id === PUBLIC_SERVER_ID ? 1 : 0));
       sorted.forEach(s => {
+        const unread = getServerUnreadCount(s.id);
+        const wrap = document.createElement('div');
+        wrap.className = 'relative';
         const btn = document.createElement('button');
         btn.className = `w-12 h-12 rounded-2xl flex items-center justify-center overflow-hidden transition ${currentServerId === s.id ? 'rounded-xl bg-discord-blurple' : 'hover:bg-discord-blurple'}`;
         btn.title = s.name;
         if (s.icon) { btn.innerHTML = `<img src="${s.icon}" class="w-full h-full object-cover" alt="">`; }
         else { btn.textContent = (s.name || 'S')[0].toUpperCase(); btn.classList.add('bg-discord-dark'); }
         btn.onclick = () => selectServer(s.id);
-        el.appendChild(btn);
+        wrap.appendChild(btn);
+        if (unread > 0) {
+          const badge = document.createElement('span');
+          badge.className = 'absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-discord-red text-white text-[10px] font-bold flex items-center justify-center';
+          badge.textContent = unread > 99 ? '99+' : String(unread);
+          wrap.appendChild(badge);
+        }
+        el.appendChild(wrap);
       });
     }
 
@@ -2610,9 +2742,11 @@
       const textItems = items.filter(c => c.type !== 'voice');
       const voiceItems = items.filter(c => c.type === 'voice');
       const renderRow = (ch, isVoice) => {
+        const unread = Number(unreadCountsByChannel[ch.id] || 0);
         const btn = document.createElement('button');
         btn.className = `w-full text-left px-2 py-1.5 rounded flex items-center gap-2 text-sm ${currentChannelId === ch.id ? 'bg-discord-dark text-white' : 'text-gray-400 hover:bg-discord-dark hover:text-white'}`;
-        btn.innerHTML = `<span>${isVoice ? '🔊' : '#'}</span><span class="truncate">${escapeHtml(ch.name)}</span>`;
+        const badge = unread > 0 ? `<span class="ml-auto min-w-[18px] h-[18px] px-1 rounded-full bg-discord-red text-white text-[10px] font-bold flex items-center justify-center">${unread > 99 ? '99+' : unread}</span>` : '';
+        btn.innerHTML = `<span>${isVoice ? '🔊' : '#'}</span><span class="truncate">${escapeHtml(ch.name)}</span>${badge}`;
         btn.onclick = () => {
           selectChannel(ch.id);
           if (window.innerWidth < 768) {
@@ -2964,6 +3098,7 @@
         leaveActiveVoiceChannel().catch(() => {});
       }
       currentChannelId = channelId;
+      markChannelRead(channelId);
       const ch = channels[channelId];
       const isVoice = ch?.type === 'voice';
       document.getElementById('channel-header-name').textContent = ch ? `${isVoice ? '🔊' : '#'} ${ch.name}` : '# general';
@@ -3017,6 +3152,7 @@
         document.getElementById('load-more').classList.toggle('hidden', !lastDoc || snap.docs.length < MESSAGE_LIMIT);
         renderMessages();
         document.getElementById('messages-loading').classList.add('hidden');
+        markChannelRead(currentChannelId);
       }, (err) => {
         document.getElementById('messages-loading').classList.add('hidden');
         showToast(err.message || 'Failed to load messages', 'error');
@@ -4015,6 +4151,7 @@
         await setDoc(userRef, ensuredProfile, { merge: true });
         const d = ensuredProfile;
         currentUser = { uid: user.uid, displayName: d?.displayName || user.email?.split('@')[0], bio: d?.bio || '', photoURL: d?.photoURL || user.photoURL || '' };
+        loadChannelReadState();
         document.getElementById('auth-screen').classList.add('hidden');
         document.getElementById('main-app').classList.remove('hidden');
         updateUserPill();
@@ -4035,6 +4172,7 @@
         stopVoiceMembersSubscription();
         stopMicStream();
         stopServerBannedAccountsWatcher();
+        stopUnreadTracking();
         if (unsubMyMemberships) { unsubMyMemberships(); unsubMyMemberships = null; }
         if (unsubMembers) { unsubMembers(); unsubMembers = null; }
         if (unsubReports) { unsubReports(); unsubReports = null; }
@@ -4045,6 +4183,7 @@
         memberUserData = {};
         userPresence = {};
         currentUser = null;
+        lastReadByChannel = {};
         currentServerId = null;
         currentChannelId = null;
         updateServerActionButtons();
