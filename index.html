@@ -465,12 +465,14 @@
         return true;
       }
       try {
-        await ensureGlobalBotProfile();
-        await ensureBotMembership(currentServerId);
+        // Best effort only: these writes can be blocked by Firestore rules.
+        ensureGlobalBotProfile().catch(() => {});
+        ensureBotMembership(currentServerId).catch(() => {});
         const reply = await askMistral(prompt);
         await sendBotMessage(currentServerId, currentChannelId, reply);
-      } catch (_) {
-        showToast('Bot failed to respond', 'error');
+      } catch (err) {
+        const reason = (err?.message || 'Unknown error').replace(/\s+/g, ' ').slice(0, 140);
+        showToast(`Bot failed: ${reason}`, 'error');
         await sendBotMessage(currentServerId, currentChannelId, 'Bot is currently unavailable. Please try again.');
       }
       return true;
@@ -1688,7 +1690,6 @@
         document.getElementById('main-app').classList.remove('hidden');
         updateUserPill();
         await updatePresence('online');
-        ensureGlobalBotProfile().catch(() => {});
         startPresenceHeartbeat();
         loadServers();
         const params = new URLSearchParams(location.search);
