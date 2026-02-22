@@ -49,15 +49,46 @@
     .context-menu { min-width: 180px; }
     .context-item:hover { background: rgba(255,255,255,0.06); }
     @media (max-width: 767px) {
+      #main-app {
+        padding-bottom: calc(66px + env(safe-area-inset-bottom));
+      }
+      #server-sidebar {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        top: auto;
+        width: 100vw;
+        height: calc(66px + env(safe-area-inset-bottom));
+        z-index: 75;
+        display: none;
+        flex-direction: row;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 8px;
+        padding: 8px 10px calc(8px + env(safe-area-inset-bottom)) 10px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        border-top: 1px solid rgba(255,255,255,0.08);
+      }
+      #server-sidebar:not(.hidden) { display: flex; }
+      #server-sidebar #server-list {
+        display: flex;
+        flex-direction: row;
+      }
+      #server-sidebar button {
+        flex: 0 0 auto;
+      }
       #channel-sidebar {
         position: fixed;
-        left: 72px;
+        left: 0;
         top: 0;
         bottom: 0;
         width: min(84vw, 320px);
         z-index: 70;
-        display: flex;
+        display: none;
       }
+      #channel-sidebar:not(.hidden) { display: flex; }
       #members-sidebar {
         position: fixed;
         right: 0;
@@ -65,15 +96,21 @@
         bottom: 0;
         width: min(82vw, 320px);
         z-index: 70;
-        display: flex;
+        display: none;
       }
+      #members-sidebar:not(.hidden) { display: flex; }
       #btn-toggle-channel {
         top: max(8px, env(safe-area-inset-top));
-        left: 80px;
+        left: 56px;
+      }
+      #btn-toggle-servers {
+        top: max(8px, env(safe-area-inset-top));
+        left: 8px;
       }
       #messages-container {
         padding-left: 10px;
         padding-right: 10px;
+        padding-top: 44px;
       }
       #message-input-area {
         padding-bottom: calc(12px + env(safe-area-inset-bottom));
@@ -81,6 +118,9 @@
       #voice-channel-panel {
         padding-left: 10px;
         padding-right: 10px;
+      }
+      #channel-header-name {
+        margin-left: 86px;
       }
     }
   </style>
@@ -156,7 +196,8 @@
         </div>
       </aside>
 
-      <button id="btn-toggle-channel" class="md:hidden fixed top-4 left-20 z-40 bg-discord-dark p-2 rounded">☰</button>
+      <button id="btn-toggle-channel" class="md:hidden fixed top-4 left-16 z-40 bg-discord-dark p-2 rounded">☰</button>
+      <button id="btn-toggle-servers" class="md:hidden fixed top-4 left-4 z-40 bg-discord-dark p-2 rounded">☷</button>
 
       <main class="flex-1 flex flex-col min-w-0 bg-discord-dark">
         <header class="h-12 px-4 flex items-center border-b border-discord-dark shadow-sm flex-shrink-0">
@@ -244,6 +285,7 @@
 
   <div id="toast-container" class="fixed bottom-4 right-4 z-[100] flex flex-col gap-2"></div>
   <div id="context-menu" class="context-menu fixed z-[120] hidden bg-discord-darker border border-discord-dark rounded shadow-xl py-1"></div>
+  <div id="mobile-panel-backdrop" class="fixed inset-0 bg-black/60 z-[65] hidden md:hidden"></div>
 
   <script type="module">
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
@@ -2692,7 +2734,10 @@
         btn.title = s.name;
         if (s.icon) { btn.innerHTML = `<img src="${s.icon}" class="w-full h-full object-cover" alt="">`; }
         else { btn.textContent = (s.name || 'S')[0].toUpperCase(); btn.classList.add('bg-discord-dark'); }
-        btn.onclick = () => selectServer(s.id);
+        btn.onclick = () => {
+          selectServer(s.id);
+          closeMobilePanels({ closeServers: true });
+        };
         wrap.appendChild(btn);
         if (unread > 0) {
           const badge = document.createElement('span');
@@ -2749,9 +2794,7 @@
         btn.innerHTML = `<span>${isVoice ? '🔊' : '#'}</span><span class="truncate">${escapeHtml(ch.name)}</span>${badge}`;
         btn.onclick = () => {
           selectChannel(ch.id);
-          if (window.innerWidth < 768) {
-            document.getElementById('channel-sidebar')?.classList.add('hidden');
-          }
+          closeMobilePanels();
         };
         el.appendChild(btn);
       };
@@ -4012,6 +4055,54 @@
       else { img.style.display = 'none'; document.getElementById('user-initial').style.display = 'flex'; }
     }
 
+    function isMobileViewport() {
+      return window.innerWidth < 768;
+    }
+
+    function updateMobileBackdrop() {
+      const backdrop = document.getElementById('mobile-panel-backdrop');
+      if (!backdrop) return;
+      if (!isMobileViewport()) {
+        backdrop.classList.add('hidden');
+        return;
+      }
+      const channelOpen = !document.getElementById('channel-sidebar').classList.contains('hidden');
+      const membersOpen = !document.getElementById('members-sidebar').classList.contains('hidden');
+      backdrop.classList.toggle('hidden', !(channelOpen || membersOpen));
+    }
+
+    function closeMobilePanels({ closeServers = false } = {}) {
+      if (!isMobileViewport()) return;
+      document.getElementById('channel-sidebar').classList.add('hidden');
+      document.getElementById('members-sidebar').classList.add('hidden');
+      if (closeServers) document.getElementById('server-sidebar').classList.add('hidden');
+      updateMobileBackdrop();
+    }
+
+    function toggleMobilePanel(panel) {
+      if (!isMobileViewport()) return;
+      const channel = document.getElementById('channel-sidebar');
+      const members = document.getElementById('members-sidebar');
+      const servers = document.getElementById('server-sidebar');
+      if (panel === 'channel') {
+        const willOpen = channel.classList.contains('hidden');
+        channel.classList.toggle('hidden', !willOpen);
+        members.classList.add('hidden');
+        updateMobileBackdrop();
+        return;
+      }
+      if (panel === 'members') {
+        const willOpen = members.classList.contains('hidden');
+        members.classList.toggle('hidden', !willOpen);
+        channel.classList.add('hidden');
+        updateMobileBackdrop();
+        return;
+      }
+      if (panel === 'servers') {
+        servers.classList.toggle('hidden');
+      }
+    }
+
     document.getElementById('user-pill').onclick = () => renderProfileModal();
 
     document.getElementById('btn-login').onclick = renderLoginModal;
@@ -4028,13 +4119,30 @@
     document.getElementById('btn-voice-join').onclick = () => joinVoiceChannel(currentChannelId);
     document.getElementById('btn-voice-leave').onclick = () => leaveActiveVoiceChannel();
     document.getElementById('btn-load-more').onclick = loadOlderMessages;
-    document.getElementById('btn-members-toggle').onclick = () => document.getElementById('members-sidebar').classList.toggle('hidden');
-    document.getElementById('btn-toggle-channel').onclick = () => document.getElementById('channel-sidebar').classList.toggle('hidden');
+    document.getElementById('btn-members-toggle').onclick = () => {
+      if (isMobileViewport()) toggleMobilePanel('members');
+      else document.getElementById('members-sidebar').classList.toggle('hidden');
+    };
+    document.getElementById('btn-toggle-channel').onclick = () => {
+      if (isMobileViewport()) toggleMobilePanel('channel');
+      else document.getElementById('channel-sidebar').classList.toggle('hidden');
+    };
+    document.getElementById('btn-toggle-servers').onclick = () => {
+      if (isMobileViewport()) toggleMobilePanel('servers');
+    };
+    document.getElementById('mobile-panel-backdrop').onclick = () => closeMobilePanels();
     document.addEventListener('click', () => hideContextMenu());
     document.addEventListener('contextmenu', (e) => {
       if (!e.target.closest('.message-group')) hideContextMenu();
     });
     window.addEventListener('resize', hideContextMenu);
+    window.addEventListener('resize', () => {
+      if (!isMobileViewport()) {
+        closeMobilePanels();
+        document.getElementById('server-sidebar').classList.remove('hidden');
+      }
+      updateMobileBackdrop();
+    });
     document.getElementById('messages-container').addEventListener('scroll', hideContextMenu);
     document.addEventListener('visibilitychange', () => {
       if (!currentUser?.uid) return;
@@ -4154,6 +4262,12 @@
         loadChannelReadState();
         document.getElementById('auth-screen').classList.add('hidden');
         document.getElementById('main-app').classList.remove('hidden');
+        if (isMobileViewport()) {
+          document.getElementById('server-sidebar').classList.add('hidden');
+          closeMobilePanels({ closeServers: false });
+        } else {
+          document.getElementById('server-sidebar').classList.remove('hidden');
+        }
         updateUserPill();
         await updatePresence('online');
         startPresenceHeartbeat();
