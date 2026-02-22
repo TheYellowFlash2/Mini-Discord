@@ -659,6 +659,53 @@
       return n * 60 * 60 * 1000;
     }
 
+    function formatDurationRemaining(ms) {
+      const remaining = Math.max(0, Number(ms) || 0);
+      const totalMinutes = Math.ceil(remaining / 60000);
+      if (totalMinutes < 60) return `${totalMinutes} minute${totalMinutes === 1 ? '' : 's'}`;
+      const totalHours = Math.ceil(totalMinutes / 60);
+      if (totalHours < 24) return `${totalHours} hour${totalHours === 1 ? '' : 's'}`;
+      const totalDays = Math.ceil(totalHours / 24);
+      return `${totalDays} day${totalDays === 1 ? '' : 's'}`;
+    }
+
+    async function getActiveSuspension(serverId, userId = currentUser?.uid) {
+      if (!serverId || !userId) return null;
+      try {
+        const suspensionRef = doc(db, 'servers', serverId, 'suspended', userId);
+        const snap = await getDoc(suspensionRef);
+        if (!snap.exists()) return null;
+        const data = snap.data() || {};
+        const untilMs = Number(data.untilMs || 0);
+        if (!untilMs || untilMs <= Date.now()) {
+          deleteDoc(suspensionRef).catch(() => {});
+          return null;
+        }
+        return { ...data, untilMs };
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function showSuspensionLockModal(serverName, suspension) {
+      const remaining = formatDurationRemaining((suspension?.untilMs || 0) - Date.now());
+      const untilLabel = new Date(Number(suspension?.untilMs || Date.now())).toLocaleString();
+      const reason = (suspension?.reason || '').trim();
+      modal.open('Server Locked', `
+        <div class="space-y-3">
+          <p class="text-sm text-gray-300">You are suspended from <span class="text-white font-medium">${escapeHtml(serverName || 'this server')}</span>.</p>
+          <div class="rounded border border-discord-dark bg-discord-darkest/40 p-3 text-sm text-gray-300">
+            <div>Remaining: <span class="text-white font-medium">${escapeHtml(remaining)}</span></div>
+            <div class="text-xs text-gray-500 mt-1">Ends: ${escapeHtml(untilLabel)}</div>
+            ${reason ? `<div class="text-xs text-gray-400 mt-1">Reason: ${escapeHtml(reason)}</div>` : ''}
+          </div>
+          <button type="button" id="suspension-lock-ok" class="w-full py-2 rounded bg-discord-blurple hover:bg-indigo-600 font-medium">OK</button>
+        </div>
+      `);
+      const okBtn = document.getElementById('suspension-lock-ok');
+      if (okBtn) okBtn.onclick = () => modal.closeModal();
+    }
+
     async function deleteMessagesByFilter({ channelId = null, olderThanMs = null } = {}) {
       if (!currentServerId || !currentUser?.uid) return { deleted: 0, filesDeleted: 0 };
       const srv = servers[currentServerId];
@@ -1137,6 +1184,11 @@
       const invData = inv.data();
       const bannedSnap = await getDoc(doc(db, 'servers', invData.serverId, 'banned', currentUser.uid));
       if (bannedSnap.exists()) { showToast('You are banned from this server', 'error'); return; }
+      const activeSuspension = await getActiveSuspension(invData.serverId, currentUser.uid);
+      if (activeSuspension) {
+        showSuspensionLockModal(servers[invData.serverId]?.name || 'this server', activeSuspension);
+        return;
+      }
       const existing = await getDocs(query(collection(db, 'memberships'), where('serverId', '==', invData.serverId), where('userId', '==', currentUser.uid)));
       if (!existing.empty) { showToast('Already a member', 'info'); selectServer(invData.serverId); modal.closeModal(); return; }
       await setDoc(doc(db, 'servers', invData.serverId, 'members', currentUser.uid), { role: 'member' });
@@ -1171,7 +1223,16 @@
       renderMessages();
     }
 
-    function selectServer(serverId) {
+    async function selectServer(serverId) {
+      const suspension = await getActiveSuspension(serverId, currentUser?.uid);
+      if (suspension) {
+        const serverName = servers[serverId]?.name || 'this server';
+        showSuspensionLockModal(serverName, suspension);
+        if (serverId !== PUBLIC_SERVER_ID && servers[PUBLIC_SERVER_ID] && currentServerId !== PUBLIC_SERVER_ID) {
+          selectServer(PUBLIC_SERVER_ID);
+        }
+        return;
+      }
       currentServerId = serverId;
       currentChannelId = null;
       seenReportAlerts.clear();
@@ -1477,6 +1538,11 @@
         showToast('Select a channel first', 'error');
         return;
       }
+      const activeSuspension = await getActiveSuspension(currentServerId, currentUser.uid);
+      if (activeSuspension) {
+        showSuspensionLockModal(servers[currentServerId]?.name || 'this server', activeSuspension);
+        return;
+      }
       if (!text && pendingAttachments.length === 0) return;
       if (text.toLowerCase().startsWith('/bot')) {
         input.value = '';
@@ -1625,6 +1691,64 @@
       } catch (e) { showToast(e.message, 'error'); }
     }
 
+    async function suspendUser(userId, durationMs, reason = '') {
+      if (!currentServerId || !isAdmin()) return;
+      if (!durationMs || durationMs <= 0) { showToast('Set a valid suspension duration', 'error'); return; }
+      const srv = servers[currentServerId];
+      if (srv?.ownerId === userId) { showToast('Cannot suspend server owner', 'error'); return; }
+      if (userId === BOT_USER_ID) { showToast('Cannot suspend bot account', 'error'); return; }
+      const mem = Object.values(members).find(m => m.serverId === currentServerId && m.userId === userId);
+      if (!mem) { showToast('User is not in this server', 'error'); return; }
+      const untilMs = Date.now() + durationMs;
+      try {
+        await setDoc(doc(db, 'servers', currentServerId, 'suspended', userId), {
+          userId,
+          reason: (reason || '').trim().slice(0, 200),
+          suspendedBy: currentUser.uid,
+          suspendedAt: serverTimestamp(),
+          untilMs
+        }, { merge: true });
+        showToast('User suspended', 'success');
+      } catch (e) {
+        showToast(e.message || 'Failed to suspend user', 'error');
+      }
+    }
+
+    function renderSuspendUserModal(userId) {
+      if (!currentServerId || !isAdmin()) return;
+      const mem = Object.values(members).find(m => m.serverId === currentServerId && m.userId === userId);
+      const ud = memberUserData[userId] || {};
+      const displayName = getUserDisplayName(ud, mem) || 'Unknown';
+      modal.open('Suspend User', `
+        <form id="suspend-user-form" class="space-y-4">
+          <p class="text-sm text-gray-300">Suspend <span class="text-white font-medium">${escapeHtml(displayName)}</span> from this server.</p>
+          <div class="flex items-center gap-2">
+            <input id="suspend-duration-value" type="number" min="1" value="1" class="w-24 bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+            <select id="suspend-duration-unit" class="bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+              <option value="hours">hours</option>
+              <option value="minutes">minutes</option>
+              <option value="days">days</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Reason (optional)</label>
+            <textarea id="suspend-reason" rows="3" maxlength="200" placeholder="Why is this user suspended?" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple resize-none"></textarea>
+          </div>
+          <button type="submit" class="w-full py-2 rounded bg-amber-700 hover:bg-amber-600 font-medium">Apply Suspension</button>
+        </form>
+      `);
+      document.getElementById('suspend-user-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const value = document.getElementById('suspend-duration-value').value;
+        const unit = document.getElementById('suspend-duration-unit').value;
+        const reason = document.getElementById('suspend-reason').value;
+        const durationMs = getDurationMs(value, unit);
+        await suspendUser(userId, durationMs, reason);
+        modal.closeModal();
+        renderAdminModal();
+      };
+    }
+
     async function makeAdmin(userId) {
       if (!currentServerId || !currentUser?.uid) return;
       const srv = servers[currentServerId];
@@ -1691,6 +1815,7 @@
               <div class="flex gap-1">
                 ${isOwner && m.role !== 'admin' ? `<button type="button" class="text-xs px-2 py-1 rounded bg-discord-blurple hover:bg-indigo-600" data-make-admin="${m.userId}">Make Admin</button>` : ''}
                 ${isOwner && m.role === 'admin' ? `<button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-discord-red" data-remove-admin="${m.userId}">Remove Admin</button>` : ''}
+                <button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-amber-600" data-suspend="${m.userId}">Suspend</button>
                 <button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-amber-600" data-kick="${m.userId}">Kick</button>
                 <button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-discord-red" data-ban="${m.userId}">Ban</button>
               </div>
@@ -1747,6 +1872,7 @@
       `);
       document.querySelectorAll('[data-ban]').forEach(btn => btn.onclick = () => banUser(btn.dataset.ban));
       document.querySelectorAll('[data-kick]').forEach(btn => btn.onclick = () => kickUser(btn.dataset.kick));
+      document.querySelectorAll('[data-suspend]').forEach(btn => btn.onclick = () => renderSuspendUserModal(btn.dataset.suspend));
       document.querySelectorAll('[data-make-admin]').forEach(btn => btn.onclick = () => makeAdmin(btn.dataset.makeAdmin));
       document.querySelectorAll('[data-remove-admin]').forEach(btn => btn.onclick = () => removeAdmin(btn.dataset.removeAdmin));
       document.querySelectorAll('[data-delete-channel]').forEach(btn => btn.onclick = () => {
