@@ -195,7 +195,7 @@
 
   <script type="module">
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
-    import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
+    import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, deleteUser as firebaseDeleteUser } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
     import { getFirestore, collection, doc, setDoc, getDoc, getDocs, addDoc, updateDoc, deleteDoc, query, where, orderBy, limit, startAfter, onSnapshot, serverTimestamp, increment } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
     import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js';
 
@@ -1181,6 +1181,65 @@
       document.getElementById('main-app').classList.add('hidden');
     }
 
+    async function deleteMyAccount() {
+      if (!currentUser?.uid) return;
+      const uid = currentUser.uid;
+      const authUser = auth.currentUser;
+      if (!authUser || authUser.uid !== uid) {
+        showToast('Please sign in again and retry', 'error');
+        return;
+      }
+      try {
+        const ownedServers = await getDocs(query(collection(db, 'servers'), where('ownerId', '==', uid)));
+        const ownedNonPublic = ownedServers.docs.filter(d => d.id !== PUBLIC_SERVER_ID);
+        if (ownedNonPublic.length > 0) {
+          showToast('Transfer/delete owned servers before deleting account', 'error');
+          return;
+        }
+
+        const membershipsSnap = await getDocs(query(collection(db, 'memberships'), where('userId', '==', uid)));
+        for (const mem of membershipsSnap.docs) {
+          const serverId = mem.data()?.serverId;
+          if (serverId) {
+            try { await deleteDoc(doc(db, 'servers', serverId, 'members', uid)); } catch (_) {}
+            try { await deleteDoc(doc(db, 'servers', serverId, 'banned', uid)); } catch (_) {}
+            try { await deleteDoc(doc(db, 'servers', serverId, 'suspended', uid)); } catch (_) {}
+          }
+          await deleteDoc(mem.ref);
+        }
+
+        const reportsByUser = await getDocs(query(collection(db, 'reports'), where('reportedBy', '==', uid)));
+        for (const r of reportsByUser.docs) await deleteDoc(r.ref);
+
+        const myMessages = await getDocs(query(collection(db, 'messages'), where('userId', '==', uid)));
+        for (const m of myMessages.docs) {
+          try { await deleteMessageWithAttachments(m.id, m.data()); } catch (_) {}
+        }
+
+        try { await deleteDoc(doc(db, 'botMemory', uid)); } catch (_) {}
+        try {
+          await deleteDoc(doc(db, 'users', uid));
+        } catch (_) {}
+
+        if (currentUser?.photoURL?.includes('firebasestorage.googleapis.com')) {
+          const avatarPath = getAttachmentStoragePath({ url: currentUser.photoURL });
+          if (avatarPath) {
+            try { await deleteObject(ref(storage, avatarPath)); } catch (_) {}
+          }
+        }
+
+        await firebaseDeleteUser(authUser);
+        showToast('Account deleted', 'success');
+      } catch (err) {
+        const msg = String(err?.message || '').toLowerCase();
+        if (msg.includes('requires-recent-login')) {
+          showToast('Please log out and log back in, then delete account.', 'error');
+          return;
+        }
+        showToast(err?.message || 'Failed to delete account', 'error');
+      }
+    }
+
     function renderLoginModal() {
       modal.open('Login', `
         <form id="login-form" class="space-y-4">
@@ -1257,6 +1316,10 @@
               <button type="button" id="profile-notifications-toggle" class="px-3 py-1 rounded text-sm font-medium transition ${notificationsEnabled ? 'bg-discord-blurple hover:bg-indigo-600 text-white' : 'bg-discord-dark hover:bg-discord-darker text-gray-300'}">${notificationsEnabled ? 'On' : 'Off'}</button>
             </div>
           </div>
+          <div class="rounded border border-discord-red/50 bg-discord-dark/40 p-3">
+            <div class="text-sm text-gray-200 mb-2">Danger Zone</div>
+            <button type="button" id="profile-delete-account" class="w-full py-2 rounded bg-discord-red hover:bg-red-500 text-sm font-medium">Delete Account</button>
+          </div>
           <button type="submit" class="w-full py-2 bg-discord-blurple hover:bg-indigo-600 rounded font-medium">Save</button>
         </form>
       `);
@@ -1266,6 +1329,12 @@
       else { img.style.display = 'none'; initialSpan.style.display = 'flex'; }
       document.getElementById('profile-notifications-toggle').onclick = async () => {
         await setNotificationsEnabled(!notificationsEnabled);
+      };
+      document.getElementById('profile-delete-account').onclick = async () => {
+        if (!confirm('Delete your account permanently? This cannot be undone.')) return;
+        if (!confirm('Final confirmation: all your account data will be removed.')) return;
+        modal.closeModal();
+        await deleteMyAccount();
       };
       updateNotificationToggleUI();
       document.getElementById('profile-avatar-input').onchange = async (e) => {
