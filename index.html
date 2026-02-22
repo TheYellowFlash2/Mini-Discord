@@ -696,8 +696,7 @@
       const target = normalizeLanguageCode(userLanguage);
       const trimmed = (text || '').trim();
       if (!trimmed) return false;
-      if (target !== 'en') return true;
-      return looksNonEnglish(trimmed);
+      return !!target;
     }
 
     async function translateWithMistral(text, targetLanguageCode) {
@@ -714,6 +713,7 @@
           max_tokens: 500,
           messages: [
             { role: 'system', content: `Translate the user text to ${targetLabel}. Preserve bullets, numbering, and markdown-style emphasis. Return only translated text.` },
+            { role: 'system', content: `If the input is already in ${targetLabel}, return it unchanged.` },
             { role: 'user', content: text }
           ]
         })
