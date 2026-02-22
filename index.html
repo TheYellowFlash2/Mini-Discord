@@ -217,6 +217,9 @@
     let unsubPresence = null;
     let unsubMembers = null;
     let unsubMyMemberships = null;
+    let unsubReports = null;
+    let reportAlertInitialized = false;
+    const seenReportAlerts = new Set();
     let serversLoadVersion = 0;
     let membersLoadVersion = 0;
     let presenceInterval = null;
@@ -238,6 +241,7 @@
     let activeMemberProfileUserId = null;
     const NOTIFICATION_PREF_KEY = 'mini_discord_notifications_enabled';
     let notificationsEnabled = localStorage.getItem(NOTIFICATION_PREF_KEY) === 'true';
+    const REPORT_REASONS = ['Harassment', 'Spam', 'Hate Speech', 'Threats', 'Impersonation', 'Other'];
 
     const EMOJI_CATEGORIES = {
       'Smileys': ['😀','😃','😄','😁','😆','😅','🤣','😂','🙂','🙃','😉','😊','😇','🥰','😍','🤩','😘','😗','☺','😚','😙','🥲','😋','😛','😜','🤪','😝','🤑','🤗','🤭','🤫','🤔','🤐','🤨','😐','😑','😶','😏','😒','🙄','😬','🤥','😌','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🤧','🥵','🥶','🥴','😵','🤯','🤠','🥳','🥸'],
@@ -372,6 +376,146 @@
         tag: `msg-${messageId}`
       });
       notif.onclick = () => window.focus();
+    }
+
+    async function resolveReport(reportId, action = 'dismissed', reportedUserId = '') {
+      if (!reportId || !isAdmin()) return;
+      try {
+        await updateDoc(doc(db, 'reports', reportId), {
+          status: action === 'kicked' ? 'actioned' : 'dismissed',
+          action,
+          resolvedBy: currentUser.uid,
+          resolvedAt: serverTimestamp()
+        });
+      } catch (_) {}
+      if (action === 'kicked' && reportedUserId) {
+        try {
+          await kickUserFromServer(currentServerId, reportedUserId, 'User kicked from report');
+        } catch (_) {}
+      }
+    }
+
+    function maybeNotifyForReport(reportId, reportData) {
+      if (!reportData || reportData.reportedBy === currentUser?.uid) return;
+      const reportedName = getUserDisplayName(memberUserData[reportData.reportedUserId], {}) || 'a user';
+      const reporterName = getUserDisplayName(memberUserData[reportData.reportedBy], {}) || 'Someone';
+      const reason = reportData.reason || 'Rule violation';
+      if (document.hidden && notificationsEnabled && notificationsSupported() && Notification.permission === 'granted') {
+        const notif = new Notification(`New report: ${reportedName}`, {
+          body: `${reporterName} reported ${reportedName} for ${reason}`,
+          tag: `report-${reportId}`
+        });
+        notif.onclick = () => {
+          window.focus();
+          renderAdminModal();
+        };
+        return;
+      }
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = 'bg-discord-darker border border-amber-600/60 px-4 py-3 rounded shadow-lg toast-enter';
+      const details = (reportData.details || '').trim();
+      toast.innerHTML = `
+        <div class="text-sm">
+          <div class="font-semibold text-amber-300">New user report</div>
+          <div class="text-gray-200 mt-1">${escapeHtml(reporterName)} reported ${escapeHtml(reportedName)}</div>
+          <div class="text-xs text-gray-400 mt-1">Reason: ${escapeHtml(reason)}</div>
+          ${details ? `<div class="text-xs text-gray-500 mt-1 max-w-[260px] truncate">"${escapeHtml(details)}"</div>` : ''}
+          <div class="mt-2 flex gap-2">
+            <button type="button" data-report-kick="${reportId}" class="text-xs px-2 py-1 rounded bg-discord-red hover:bg-red-500">Kick</button>
+            <button type="button" data-report-dismiss="${reportId}" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-discord-darkest">Dismiss</button>
+          </div>
+        </div>
+      `;
+      container.appendChild(toast);
+      const kickBtn = toast.querySelector(`[data-report-kick="${reportId}"]`);
+      const dismissBtn = toast.querySelector(`[data-report-dismiss="${reportId}"]`);
+      if (kickBtn) {
+        kickBtn.onclick = async () => {
+          await resolveReport(reportId, 'kicked', reportData.reportedUserId);
+          toast.remove();
+        };
+      }
+      if (dismissBtn) {
+        dismissBtn.onclick = async () => {
+          await resolveReport(reportId, 'dismissed', reportData.reportedUserId);
+          toast.remove();
+        };
+      }
+      setTimeout(() => toast.remove(), 25000);
+    }
+
+    function subscribeReports() {
+      if (unsubReports) { unsubReports(); unsubReports = null; }
+      reportAlertInitialized = false;
+      if (!currentServerId || !currentUser?.uid || !isAdmin()) return;
+      const q = query(
+        collection(db, 'reports'),
+        where('serverId', '==', currentServerId),
+        where('status', '==', 'open'),
+        orderBy('createdAt', 'desc'),
+        limit(25)
+      );
+      unsubReports = onSnapshot(q, (snap) => {
+        if (!reportAlertInitialized) {
+          snap.docs.forEach(d => seenReportAlerts.add(d.id));
+          reportAlertInitialized = true;
+          return;
+        }
+        snap.docChanges().forEach((change) => {
+          if (change.type !== 'added') return;
+          if (seenReportAlerts.has(change.doc.id)) return;
+          seenReportAlerts.add(change.doc.id);
+          maybeNotifyForReport(change.doc.id, change.doc.data());
+        });
+      }, (err) => {
+        if (DEBUG_MODE) console.error('Report subscription failed', err);
+      });
+    }
+
+    function renderReportUserModal(userId) {
+      const memberData = memberUserData[userId] || {};
+      const displayName = getUserDisplayName(memberData, {}) || 'Unknown';
+      modal.open('Report User', `
+        <form id="report-user-form" class="space-y-4">
+          <p class="text-sm text-gray-400">Reporting <span class="text-white font-medium">${escapeHtml(displayName)}</span></p>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Reason</label>
+            <select id="report-reason" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
+              ${REPORT_REASONS.map((r) => `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">Details</label>
+            <textarea id="report-details" rows="4" maxlength="300" placeholder="What happened?" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple resize-none"></textarea>
+          </div>
+          <button type="submit" class="w-full py-2 bg-discord-red hover:bg-red-500 rounded font-medium">Report User</button>
+        </form>
+      `);
+      document.getElementById('report-user-form').onsubmit = async (e) => {
+        e.preventDefault();
+        if (!currentUser?.uid || !currentServerId || !userId) return;
+        if (userId === currentUser.uid) { showToast('You cannot report yourself', 'error'); return; }
+        const reason = document.getElementById('report-reason').value;
+        const details = document.getElementById('report-details').value.trim();
+        try {
+          await addDoc(collection(db, 'reports'), {
+            serverId: currentServerId,
+            channelId: currentChannelId || null,
+            status: 'open',
+            reason: reason || 'Other',
+            details: details.slice(0, 300),
+            reportedUserId: userId,
+            reportedBy: currentUser.uid,
+            reportedByDisplayName: currentUser.displayName || 'User',
+            createdAt: serverTimestamp()
+          });
+          showToast('Report sent to admins', 'success');
+          modal.closeModal();
+        } catch (err) {
+          showToast(err?.message || 'Failed to submit report', 'error');
+        }
+      };
     }
 
     function getUserDisplayName(userData, memberData) {
@@ -953,6 +1097,7 @@
     function selectServer(serverId) {
       currentServerId = serverId;
       currentChannelId = null;
+      seenReportAlerts.clear();
       document.getElementById('current-server-name').textContent = servers[serverId]?.name || 'Server';
       loadChannels(serverId);
       loadMembers();
@@ -1224,9 +1369,11 @@
         });
         const adminDelBtn = isAdmin() ? `<button type="button" class="opacity-0 group-hover:opacity-100 ml-1 text-xs text-discord-red hover:underline transition" data-delete-msg="${m.id}" title="Delete message">Delete</button>` : '';
         const replyBtn = `<button type="button" class="opacity-0 group-hover:opacity-100 ml-1 text-xs text-discord-blurple hover:underline transition" data-reply-msg="${m.id}" title="Reply">Reply</button>`;
+        const canReportUser = !isOwn && m.userId !== BOT_USER_ID;
+        const reportBtn = canReportUser ? `<button type="button" class="opacity-0 group-hover:opacity-100 ml-1 text-xs text-amber-400 hover:underline transition" data-report-msg-user="${m.userId}" title="Report user">Report</button>` : '';
         const replyPreview = m.replyTo ? `<div class="mb-1 py-1 px-2 rounded border-l-2 border-discord-blurple/50 bg-discord-darkest/50 text-xs"><span class="text-discord-blurple">${escapeHtml(m.replyTo.displayName || 'Unknown')}</span><span class="text-gray-500">: </span><span class="text-gray-400 truncate">${escapeHtml((m.replyTo.text || '').slice(0, 80))}${(m.replyTo.text || '').length > 80 ? '...' : ''}</span></div>` : '';
         const botBadge = isBot ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-discord-blurple text-white font-bold align-middle">BOT</span>' : '';
-        const msgContent = `<div class="flex-1 min-w-0 max-w-[75%] ${isOwn ? 'text-right' : ''}"><div class="flex items-baseline gap-2 flex-wrap ${isOwn ? 'justify-end' : ''}"><span class="font-semibold text-white">${escapeHtml(displayName)}</span>${botBadge}<span class="text-xs text-gray-500">${time}</span>${edited}${replyBtn}${adminDelBtn}</div>${replyPreview}<div class="text-gray-300 break-words ${isOwn ? 'bg-discord-blurple/30 rounded-lg px-3 py-2 inline-block' : ''}">${content}</div></div>`;
+        const msgContent = `<div class="flex-1 min-w-0 max-w-[75%] ${isOwn ? 'text-right' : ''}"><div class="flex items-baseline gap-2 flex-wrap ${isOwn ? 'justify-end' : ''}"><span class="font-semibold text-white">${escapeHtml(displayName)}</span>${botBadge}<span class="text-xs text-gray-500">${time}</span>${edited}${replyBtn}${reportBtn}${adminDelBtn}</div>${replyPreview}<div class="text-gray-300 break-words ${isOwn ? 'bg-discord-blurple/30 rounded-lg px-3 py-2 inline-block' : ''}">${content}</div></div>`;
         div.innerHTML = `${avatar}${msgContent}`;
         list.appendChild(div);
         const delBtn = div.querySelector('[data-delete-msg]');
@@ -1239,6 +1386,8 @@
           document.getElementById('reply-preview-text').textContent = replyingTo.text || '(attachment)';
           document.getElementById('message-input').focus();
         };
+        const reportBtnEl = div.querySelector('[data-report-msg-user]');
+        if (reportBtnEl) reportBtnEl.onclick = () => renderReportUserModal(reportBtnEl.dataset.reportMsgUser);
       });
       list.scrollTop = list.scrollHeight;
     }
@@ -1574,6 +1723,7 @@
       if (!btn) return;
       if (isAdmin()) { btn.classList.remove('hidden'); btn.onclick = renderAdminModal; }
       else { btn.classList.add('hidden'); }
+      subscribeReports();
     }
 
     async function loadMembers() {
@@ -1581,6 +1731,8 @@
       const serverId = currentServerId;
       const loadVersion = ++membersLoadVersion;
       if (unsubMembers) { unsubMembers(); unsubMembers = null; }
+      if (unsubReports) { unsubReports(); unsubReports = null; }
+      reportAlertInitialized = false;
       clearMemberUserListeners();
       members = {};
       memberUserData = {};
@@ -1636,6 +1788,7 @@
       const name = getUserDisplayName(memberData, memberRole) || 'Unknown';
       const bio = (memberData?.bio || '').trim();
       const role = servers[currentServerId]?.ownerId === userId ? 'Owner' : memberRole?.role === 'admin' ? 'Admin' : 'Member';
+      const canReport = !!currentUser?.uid && userId !== currentUser.uid && userId !== BOT_USER_ID;
       modal.open('Member Profile', `
         <div class="space-y-4">
           <div class="flex items-center gap-3">
@@ -1652,8 +1805,11 @@
             <div class="text-xs uppercase tracking-wide text-gray-500 mb-1">About</div>
             <div class="text-sm text-gray-300 bg-discord-dark rounded p-3">${escapeHtml(bio || 'No description set.')}</div>
           </div>
+          ${canReport ? '<button type="button" id="profile-report-user" class="w-full py-2 rounded bg-discord-red hover:bg-red-500 text-sm font-medium">Report User</button>' : ''}
         </div>
       `);
+      const reportBtn = document.getElementById('profile-report-user');
+      if (reportBtn) reportBtn.onclick = () => renderReportUserModal(userId);
     }
 
     function renderMembers() {
@@ -1926,6 +2082,9 @@
         stopAttachmentCleanupScheduler();
         if (unsubMyMemberships) { unsubMyMemberships(); unsubMyMemberships = null; }
         if (unsubMembers) { unsubMembers(); unsubMembers = null; }
+        if (unsubReports) { unsubReports(); unsubReports = null; }
+        reportAlertInitialized = false;
+        seenReportAlerts.clear();
         clearMemberUserListeners();
         memberUserData = {};
         userPresence = {};
