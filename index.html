@@ -218,9 +218,11 @@
     let unsubMembers = null;
     let unsubMyMemberships = null;
     let unsubReports = null;
+    let unsubActiveSuspension = null;
     let reportAlertInitialized = false;
     const seenReportAlerts = new Set();
     let openReports = {};
+    let lastSuspensionNoticeKey = '';
     let serversLoadVersion = 0;
     let membersLoadVersion = 0;
     let presenceInterval = null;
@@ -687,6 +689,46 @@
       }
     }
 
+    function stopActiveSuspensionWatcher() {
+      if (unsubActiveSuspension) {
+        unsubActiveSuspension();
+        unsubActiveSuspension = null;
+      }
+    }
+
+    function startActiveSuspensionWatcher(serverId) {
+      stopActiveSuspensionWatcher();
+      if (!serverId || !currentUser?.uid) return;
+      const watchServerId = serverId;
+      const suspensionRef = doc(db, 'servers', watchServerId, 'suspended', currentUser.uid);
+      unsubActiveSuspension = onSnapshot(suspensionRef, async (snap) => {
+        if (watchServerId !== currentServerId) return;
+        if (!snap.exists()) {
+          lastSuspensionNoticeKey = '';
+          return;
+        }
+        const data = snap.data() || {};
+        const untilMs = Number(data.untilMs || 0);
+        if (!untilMs || untilMs <= Date.now()) {
+          deleteDoc(suspensionRef).catch(() => {});
+          lastSuspensionNoticeKey = '';
+          return;
+        }
+        const noticeKey = `${watchServerId}:${untilMs}`;
+        if (lastSuspensionNoticeKey !== noticeKey) {
+          lastSuspensionNoticeKey = noticeKey;
+          showSuspensionLockModal(servers[watchServerId]?.name || 'this server', { ...data, untilMs });
+        }
+        if (watchServerId !== PUBLIC_SERVER_ID && servers[PUBLIC_SERVER_ID]) {
+          await selectServer(PUBLIC_SERVER_ID);
+        } else {
+          currentChannelId = null;
+          renderChannelList();
+          renderMessages();
+        }
+      }, () => {});
+    }
+
     function showSuspensionLockModal(serverName, suspension) {
       const remaining = formatDurationRemaining((suspension?.untilMs || 0) - Date.now());
       const untilLabel = new Date(Number(suspension?.untilMs || Date.now())).toLocaleString();
@@ -972,6 +1014,7 @@
       try { await updatePresence('offline'); } catch (_) {}
       stopPresenceHeartbeat();
       stopAttachmentCleanupScheduler();
+      stopActiveSuspensionWatcher();
       await signOut(auth);
       currentServerId = null;
       currentChannelId = null;
@@ -1218,6 +1261,7 @@
       await deleteDoc(doc(db, 'memberships', mem.id));
       showToast('Left server', 'info');
       currentServerId = null; currentChannelId = null;
+      stopActiveSuspensionWatcher();
       loadServers();
       renderChannelList();
       renderMessages();
@@ -1237,6 +1281,8 @@
       currentChannelId = null;
       seenReportAlerts.clear();
       openReports = {};
+      lastSuspensionNoticeKey = '';
+      startActiveSuspensionWatcher(serverId);
       document.getElementById('current-server-name').textContent = servers[serverId]?.name || 'Server';
       loadChannels(serverId);
       loadMembers();
@@ -2294,6 +2340,7 @@
       } else {
         stopPresenceHeartbeat();
         stopAttachmentCleanupScheduler();
+        stopActiveSuspensionWatcher();
         if (unsubMyMemberships) { unsubMyMemberships(); unsubMyMemberships = null; }
         if (unsubMembers) { unsubMembers(); unsubMembers = null; }
         if (unsubReports) { unsubReports(); unsubReports = null; }
