@@ -290,7 +290,7 @@
   <script type="module">
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
     import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, deleteUser as firebaseDeleteUser } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
-    import { getFirestore, collection, doc, setDoc, getDoc, getDocs, addDoc, updateDoc, deleteDoc, query, where, orderBy, limit, startAfter, onSnapshot, serverTimestamp, increment } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+    import { getFirestore, collection, doc, setDoc, getDoc, getDocs, addDoc, updateDoc, deleteDoc, query, where, orderBy, limit, startAfter, onSnapshot, serverTimestamp, increment, Timestamp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
     import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js';
 
     const app = initializeApp(firebaseConfig);
@@ -493,9 +493,14 @@
 
     function markChannelRead(channelId) {
       if (!channelId) return;
-      lastReadByChannel[channelId] = Date.now();
+      const now = Date.now();
+      const prev = getChannelLastReadAt(channelId);
+      lastReadByChannel[channelId] = now;
       unreadCountsByChannel[channelId] = 0;
       persistChannelReadState();
+      if (!prev || now - prev > 1500) {
+        restartUnreadChannelListener(channelId);
+      }
       renderChannelList();
       renderServerList();
     }
@@ -509,14 +514,43 @@
       knownChannelsByServer = {};
     }
 
-    function startUnreadChannelListener(serverId, channelId) {
-      if (!serverId || !channelId || unreadChannelUnsubs[channelId]) return;
-      const q = query(
+    function findServerIdByChannel(channelId) {
+      const direct = channels[channelId]?.serverId;
+      if (direct) return direct;
+      const sid = Object.keys(knownChannelsByServer).find((id) => (knownChannelsByServer[id] || []).includes(channelId));
+      return sid || '';
+    }
+
+    function buildUnreadChannelQuery(channelId) {
+      const lastReadAt = getChannelLastReadAt(channelId);
+      if (lastReadAt > 0) {
+        return query(
+          collection(db, 'messages'),
+          where('channelId', '==', channelId),
+          where('createdAt', '>', Timestamp.fromMillis(lastReadAt)),
+          orderBy('createdAt', 'desc')
+        );
+      }
+      return query(
         collection(db, 'messages'),
         where('channelId', '==', channelId),
-        orderBy('createdAt', 'desc'),
-        limit(200)
+        orderBy('createdAt', 'desc')
       );
+    }
+
+    function restartUnreadChannelListener(channelId) {
+      const sid = findServerIdByChannel(channelId);
+      if (!sid) return;
+      if (unreadChannelUnsubs[channelId]) {
+        unreadChannelUnsubs[channelId]();
+        delete unreadChannelUnsubs[channelId];
+      }
+      startUnreadChannelListener(sid, channelId);
+    }
+
+    function startUnreadChannelListener(serverId, channelId) {
+      if (!serverId || !channelId || unreadChannelUnsubs[channelId]) return;
+      const q = buildUnreadChannelQuery(channelId);
       unreadChannelUnsubs[channelId] = onSnapshot(q, (snap) => {
         const isOpen = currentServerId === serverId && currentChannelId === channelId;
         if (isOpen) {
@@ -525,11 +559,7 @@
           renderServerList();
           return;
         }
-        const lastReadAt = getChannelLastReadAt(channelId);
-        const count = snap.docs.filter((d) => {
-          const ms = d.data()?.createdAt?.toDate ? d.data().createdAt.toDate().getTime() : 0;
-          return ms > lastReadAt;
-        }).length;
+        const count = snap.size;
         unreadCountsByChannel[channelId] = count;
         renderChannelList();
         renderServerList();
