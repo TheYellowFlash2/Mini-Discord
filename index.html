@@ -251,6 +251,7 @@
     let serverBannedAccounts = {};
     let voiceMembers = {};
     let activeVoiceChannelId = null;
+    let activeVoiceStream = null;
     let serversLoadVersion = 0;
     let membersLoadVersion = 0;
     let presenceInterval = null;
@@ -1934,6 +1935,7 @@
       stopPublicSuspensionLifecycleWatcher();
       leaveActiveVoiceChannel().catch(() => {});
       stopVoiceMembersSubscription();
+      stopMicStream();
       await signOut(auth);
       currentServerId = null;
       currentChannelId = null;
@@ -2387,6 +2389,7 @@
       currentServerId = null; currentChannelId = null;
       leaveActiveVoiceChannel().catch(() => {});
       stopVoiceMembersSubscription();
+      stopMicStream();
       stopActiveSuspensionWatcher();
       stopServerBannedAccountsWatcher();
       loadServers();
@@ -2399,6 +2402,7 @@
         leaveActiveVoiceChannel().catch(() => {});
       }
       stopVoiceMembersSubscription();
+      stopMicStream();
       const nameBlocked = await isBannedNameForServer(serverId, currentUser?.displayName || '');
       if (nameBlocked) {
         showToast('Your account name is blocked from this server', 'error');
@@ -2635,6 +2639,23 @@
       renderVoicePanel();
     }
 
+    async function ensureMicAccess() {
+      if (activeVoiceStream && activeVoiceStream.active) return activeVoiceStream;
+      if (!navigator?.mediaDevices?.getUserMedia) {
+        throw new Error('Microphone is not supported in this browser');
+      }
+      activeVoiceStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      return activeVoiceStream;
+    }
+
+    function stopMicStream() {
+      if (!activeVoiceStream) return;
+      try {
+        activeVoiceStream.getTracks().forEach((t) => t.stop());
+      } catch (_) {}
+      activeVoiceStream = null;
+    }
+
     async function leaveActiveVoiceChannel() {
       if (!activeVoiceChannelId || !currentUser?.uid) return;
       const channelId = activeVoiceChannelId;
@@ -2642,6 +2663,7 @@
       try {
         await deleteDoc(doc(db, 'channels', channelId, 'voiceMembers', currentUser.uid));
       } catch (_) {}
+      stopMicStream();
       renderVoicePanel();
     }
 
@@ -2653,6 +2675,7 @@
         return;
       }
       try {
+        await ensureMicAccess();
         if (activeVoiceChannelId && activeVoiceChannelId !== channelId) {
           await leaveActiveVoiceChannel();
         }
@@ -2662,12 +2685,16 @@
           displayName: currentUser.displayName || 'User',
           joinedAt: serverTimestamp()
         }, { merge: true });
+        showToast('Microphone connected', 'success');
         renderVoicePanel();
       } catch (err) {
         activeVoiceChannelId = null;
+        stopMicStream();
         const msg = String(err?.message || '');
         if (/missing or insufficient permissions/i.test(msg)) {
           showToast('Voice join blocked by Firestore rules. Publish latest firestore.rules.', 'error');
+        } else if (/denied|permission/i.test(msg)) {
+          showToast('Microphone permission denied', 'error');
         } else {
           showToast(err?.message || 'Failed to join voice', 'error');
         }
@@ -3657,6 +3684,7 @@
     window.addEventListener('pagehide', () => {
       if (!currentUser?.uid) return;
       leaveActiveVoiceChannel().catch(() => {});
+      stopMicStream();
       updatePresence('offline').catch(() => {});
     });
     window.addEventListener('unhandledrejection', (event) => {
@@ -3782,6 +3810,7 @@
         stopPublicSuspensionLifecycleWatcher();
         leaveActiveVoiceChannel().catch(() => {});
         stopVoiceMembersSubscription();
+        stopMicStream();
         stopServerBannedAccountsWatcher();
         if (unsubMyMemberships) { unsubMyMemberships(); unsubMyMemberships = null; }
         if (unsubMembers) { unsubMembers(); unsubMembers = null; }
