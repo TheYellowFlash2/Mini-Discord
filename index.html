@@ -1150,11 +1150,16 @@
       if (!reportId || !reportData || currentServerId !== PUBLIC_SERVER_ID) return;
       const reportedUserId = reportData.reportedUserId;
       if (!reportedUserId || reportedUserId === BOT_USER_ID) return;
+      const reason = String(reportData.reason || 'Other');
+      const details = String(reportData.details || '');
+      const targetChannelId = currentChannelId || (Object.values(channels).find(c => c.serverId === PUBLIC_SERVER_ID)?.id || '');
+      const deterministic = getDeterministicPublicReviewDecision(reason, details);
+      let action = deterministic.action;
+      let minutes = deterministic.minutes;
+      let reviewReason = deterministic.reason;
       try {
         ensureGlobalBotProfile().catch(() => {});
         ensureBotMembership(PUBLIC_SERVER_ID).catch(() => {});
-        const reason = String(reportData.reason || 'Other');
-        const details = String(reportData.details || '');
         const prompt = [
           'You are a strict moderation reviewer for a public chat.',
           'Return ONLY one JSON object with keys: action, minutes, reason.',
@@ -1184,42 +1189,49 @@
         });
         if (!res.ok) throw new Error('Review unavailable');
         const data = await res.json();
-        const targetChannelId = currentChannelId || (Object.values(channels).find(c => c.serverId === PUBLIC_SERVER_ID)?.id || '');
         const raw = extractMistralText(data?.choices?.[0]?.message?.content) || '{}';
         const jsonRaw = extractJsonObjectFromText(raw);
         let parsed = {};
         try { parsed = JSON.parse(jsonRaw); } catch (_) { parsed = {}; }
-        let action = String(parsed.action || 'none').toLowerCase();
-        let minutes = Math.max(0, Math.min(1440, Math.floor(Number(parsed.minutes || 0))));
-        let reviewReason = String(parsed.reason || reason || 'Policy violation').slice(0, 180);
-        if (!['none', 'suspend'].includes(action)) action = 'none';
-        if (action === 'suspend' && minutes <= 0) minutes = 120;
-        const deterministic = getDeterministicPublicReviewDecision(reason, details);
-        if (deterministic.action === 'suspend' && minutes < deterministic.minutes) {
-          action = 'suspend';
-          minutes = deterministic.minutes;
-          reviewReason = deterministic.reason;
+        const aiAction = String(parsed.action || 'none').toLowerCase();
+        const aiMinutes = Math.max(0, Math.min(1440, Math.floor(Number(parsed.minutes || 0))));
+        const aiReason = String(parsed.reason || '').slice(0, 180);
+        if (['none', 'suspend'].includes(aiAction)) {
+          if (aiAction === 'suspend') {
+            const nextMinutes = aiMinutes > 0 ? aiMinutes : 120;
+            if (nextMinutes >= minutes) {
+              action = 'suspend';
+              minutes = nextMinutes;
+              reviewReason = aiReason || reviewReason;
+            }
+          } else if (action !== 'suspend') {
+            action = 'none';
+            minutes = 0;
+            reviewReason = aiReason || reviewReason;
+          }
         }
-        if (action === 'suspend' && minutes > 0) {
+      } catch (err) {
+        if (DEBUG_MODE) console.error('Public report review failed', err);
+      }
+      if (action === 'suspend' && minutes > 0) {
+        try {
           const appliedMinutes = Math.max(1, minutes);
           const untilMs = Date.now() + (appliedMinutes * 60 * 1000);
           await setDoc(doc(db, 'servers', PUBLIC_SERVER_ID, 'suspended', reportedUserId), {
             userId: reportedUserId,
-            reason: `[BOT-AUTO] ${reviewReason}`,
+            reason: `[BOT-AUTO] ${String(reviewReason || 'Policy violation').slice(0, 180)}`,
             reviewSource: 'public-report-bot',
             suspendedBy: currentUser.uid,
             suspendedAt: serverTimestamp(),
             untilMs
           }, { merge: true });
-          await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, `Report reviewed: user suspended for ${appliedMinutes} minute(s). Reason: ${reviewReason}`);
-        } else {
-          await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, 'Report reviewed: no suspension applied.');
+          await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, `Report reviewed: user suspended for ${appliedMinutes} minute(s). Reason: ${String(reviewReason || 'Policy violation').slice(0, 180)}`);
+          return;
+        } catch (err) {
+          if (DEBUG_MODE) console.error('Public suspension write failed', err);
         }
-      } catch (err) {
-        const targetChannelId = currentChannelId || (Object.values(channels).find(c => c.serverId === PUBLIC_SERVER_ID)?.id || '');
-        sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, 'Report review failed to run. Please ask an admin to review manually.').catch(() => {});
-        if (DEBUG_MODE) console.error('Public report review failed', err);
       }
+      await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, 'Report reviewed: no suspension applied.');
     }
 
     async function askMistral(prompt, userId = currentUser?.uid) {
