@@ -226,6 +226,7 @@
     const seenReportAlerts = new Set();
     let openReports = {};
     let lastSuspensionNoticeKey = '';
+    let isHandlingPublicSuspensionRedirect = false;
     let serversLoadVersion = 0;
     let membersLoadVersion = 0;
     let presenceInterval = null;
@@ -918,6 +919,53 @@
       }
     }
 
+    async function ensureSafeChatServerForSuspendedUser() {
+      if (!currentUser?.uid) return null;
+      const existingLocal = Object.values(servers).find(
+        (s) => s.ownerId === currentUser.uid && s.botOnly && s.personalSafe
+      );
+      if (existingLocal?.id) return existingLocal.id;
+      const serverRef = doc(collection(db, 'servers'));
+      const channelRef = doc(collection(db, 'channels'));
+      await setDoc(serverRef, {
+        name: 'Safe Chat',
+        ownerId: currentUser.uid,
+        icon: '',
+        botOnly: true,
+        personalSafe: true,
+        createdAt: serverTimestamp()
+      });
+      await setDoc(doc(db, 'servers', serverRef.id, 'members', currentUser.uid), { role: 'owner' });
+      await setDoc(doc(collection(db, 'memberships')), { serverId: serverRef.id, userId: currentUser.uid, role: 'owner' });
+      await setDoc(channelRef, { serverId: serverRef.id, name: 'safe-chat', createdAt: serverTimestamp() });
+      ensureGlobalBotProfile().catch(() => {});
+      await setDoc(doc(db, 'servers', serverRef.id, 'members', BOT_USER_ID), { role: 'bot' }, { merge: true });
+      await setDoc(doc(collection(db, 'memberships')), { serverId: serverRef.id, userId: BOT_USER_ID, role: 'bot' });
+      await sendBotMessage(serverRef.id, channelRef.id, 'You are currently suspended from Public. Use this private chat in the meantime.');
+      await loadServers();
+      return serverRef.id;
+    }
+
+    async function redirectSuspendedUserFromPublic(suspension) {
+      if (isHandlingPublicSuspensionRedirect) return;
+      isHandlingPublicSuspensionRedirect = true;
+      try {
+        showSuspensionLockModal(servers[PUBLIC_SERVER_ID]?.name || 'Public', suspension);
+        const safeServerId = await ensureSafeChatServerForSuspendedUser();
+        if (safeServerId) {
+          currentServerId = null;
+          currentChannelId = null;
+          renderChannelList();
+          renderMessages();
+          updateServerActionButtons();
+          setTimeout(() => selectServer(safeServerId), 0);
+        }
+      } catch (_) {
+      } finally {
+        isHandlingPublicSuspensionRedirect = false;
+      }
+    }
+
     function stopActiveSuspensionWatcher() {
       if (unsubActiveSuspension) {
         unsubActiveSuspension();
@@ -948,7 +996,9 @@
           lastSuspensionNoticeKey = noticeKey;
           showSuspensionLockModal(servers[watchServerId]?.name || 'this server', { ...data, untilMs });
         }
-        if (watchServerId !== PUBLIC_SERVER_ID && servers[PUBLIC_SERVER_ID]) {
+        if (watchServerId === PUBLIC_SERVER_ID) {
+          await redirectSuspendedUserFromPublic({ ...data, untilMs });
+        } else if (servers[PUBLIC_SERVER_ID]) {
           await selectServer(PUBLIC_SERVER_ID);
         } else {
           currentChannelId = null;
@@ -1909,9 +1959,13 @@
       const suspension = await getActiveSuspension(serverId, currentUser?.uid);
       if (suspension) {
         const serverName = servers[serverId]?.name || 'this server';
-        showSuspensionLockModal(serverName, suspension);
-        if (serverId !== PUBLIC_SERVER_ID && servers[PUBLIC_SERVER_ID] && currentServerId !== PUBLIC_SERVER_ID) {
-          selectServer(PUBLIC_SERVER_ID);
+        if (serverId === PUBLIC_SERVER_ID) {
+          await redirectSuspendedUserFromPublic(suspension);
+        } else {
+          showSuspensionLockModal(serverName, suspension);
+          if (servers[PUBLIC_SERVER_ID] && currentServerId !== PUBLIC_SERVER_ID) {
+            selectServer(PUBLIC_SERVER_ID);
+          }
         }
         return;
       }
