@@ -240,6 +240,35 @@
     const BOT_USER_ID = 'global-bot-mistral';
     const BOT_DISPLAY_NAME = 'Mistral';
     const BOT_MODEL = 'pixtral-12b-2409';
+    const APP_STARTED_AT = Date.now();
+    const BOT_QUIPS = [
+      'Keep your channels tidy and your logs clear.',
+      'Moderation is consistency over intensity.',
+      'Short messages, sharp intent.'
+    ];
+    const BOT_JOKES = [
+      'Why do programmers love dark mode? Because light attracts bugs.',
+      'I would tell a UDP joke, but you might not get it.',
+      'A SQL query walks into a bar, walks up to two tables and asks: "Can I join you?"'
+    ];
+    const BOT_EIGHT_BALL = [
+      'Yes.', 'No.', 'Likely.', 'Unlikely.', 'Ask again soon.', 'Definitely.', 'Not today.', 'Signs point to yes.'
+    ];
+    const BOT_COMMAND_HELP = [
+      '/help - list supported commands',
+      '/ping - latency check',
+      '/time - current local time',
+      '/uptime - bot session uptime',
+      '/roll XdY - roll dice, e.g. /roll 2d6',
+      '/coinflip - heads or tails',
+      '/choose a | b | c - random choice',
+      '/8ball question - random answer',
+      '/serverinfo - server summary',
+      '/members - member count',
+      '/whoami - your user details',
+      '/joke - random dev joke',
+      '/quote - random bot quote'
+    ];
     const PROFANITY_WORDS = ['fuck','fucking','shit','bitch','asshole','bastard','cunt','nigger','nigga','faggot','retard','whore','slut','dick','pussy'];
     const moderationCooldownByUser = {};
     let attachmentCleanupInterval = null;
@@ -580,10 +609,11 @@
         e.preventDefault();
         if (!currentUser?.uid || !currentServerId || !userId) return;
         if (userId === currentUser.uid) { showToast('You cannot report yourself', 'error'); return; }
+        if (userId === BOT_USER_ID) { showToast('Cannot report bot account', 'error'); return; }
         const reason = document.getElementById('report-reason').value;
         const details = document.getElementById('report-details').value.trim();
         try {
-          await addDoc(collection(db, 'reports'), {
+          const reportPayload = {
             serverId: currentServerId,
             channelId: currentChannelId || null,
             status: 'open',
@@ -593,9 +623,13 @@
             reportedBy: currentUser.uid,
             reportedByDisplayName: currentUser.displayName || 'User',
             createdAt: serverTimestamp()
-          });
-          showToast('Report sent to admins', 'success');
+          };
+          const created = await addDoc(collection(db, 'reports'), reportPayload);
+          showToast(currentServerId === PUBLIC_SERVER_ID ? 'Report sent for bot review' : 'Report sent to admins', 'success');
           modal.closeModal();
+          if (currentServerId === PUBLIC_SERVER_ID) {
+            reviewPublicReportAndMaybeSuspend(created.id, reportPayload).catch(() => {});
+          }
         } catch (err) {
           showToast(err?.message || 'Failed to submit report', 'error');
         }
@@ -933,7 +967,7 @@
     async function ensureGlobalBotProfile() {
       await setDoc(doc(db, 'users', BOT_USER_ID), {
         displayName: BOT_DISPLAY_NAME,
-        bio: 'Global assistant bot powered by Mistral.',
+        bio: 'Assistant bot for this server. Mention bot/ai/mistral or use commands like /help, /ping, /roll, /choose, /serverinfo, /members, /whoami, /joke, /quote.',
         photoURL: '',
         isBot: true,
         status: 'online',
@@ -969,6 +1003,139 @@
       });
     }
 
+    function getCurrentServerMemberCount(serverId) {
+      return Object.values(members).filter(m => m.serverId === serverId).length;
+    }
+
+    function formatUptime() {
+      const ms = Date.now() - APP_STARTED_AT;
+      const mins = Math.floor(ms / 60000);
+      const hours = Math.floor(mins / 60);
+      const days = Math.floor(hours / 24);
+      const remHours = hours % 24;
+      const remMins = mins % 60;
+      if (days > 0) return `${days}d ${remHours}h ${remMins}m`;
+      if (hours > 0) return `${hours}h ${remMins}m`;
+      return `${Math.max(1, remMins)}m`;
+    }
+
+    function pickRandom(arr) {
+      if (!Array.isArray(arr) || arr.length === 0) return '';
+      return arr[Math.floor(Math.random() * arr.length)];
+    }
+
+    function parseDiceRoll(raw) {
+      const m = String(raw || '').trim().match(/^(\d{1,2})d(\d{1,3})$/i);
+      if (!m) return null;
+      const count = Number(m[1]);
+      const sides = Number(m[2]);
+      if (!count || !sides || count < 1 || count > 20 || sides < 2 || sides > 1000) return null;
+      return { count, sides };
+    }
+
+    function runBuiltInBotCommand(prompt) {
+      const p = String(prompt || '').trim();
+      if (!p) return null;
+      const clean = p.startsWith('/') ? p.slice(1) : p;
+      const [cmdRaw, ...restArr] = clean.split(/\s+/);
+      const cmd = (cmdRaw || '').toLowerCase();
+      const rest = restArr.join(' ').trim();
+      if (!cmd) return null;
+
+      if (cmd === 'help') return `Supported commands:\n- ${BOT_COMMAND_HELP.join('\n- ')}`;
+      if (cmd === 'ping') return 'Pong.';
+      if (cmd === 'time') return `Local time: ${new Date().toLocaleString()}`;
+      if (cmd === 'uptime') return `Uptime: ${formatUptime()}`;
+      if (cmd === 'coinflip') return `Coinflip: ${Math.random() < 0.5 ? 'Heads' : 'Tails'}`;
+      if (cmd === 'joke') return pickRandom(BOT_JOKES);
+      if (cmd === 'quote') return pickRandom(BOT_QUIPS);
+      if (cmd === '8ball') return `8ball: ${pickRandom(BOT_EIGHT_BALL)}`;
+      if (cmd === 'members') return `Members in this server: ${getCurrentServerMemberCount(currentServerId)}`;
+      if (cmd === 'whoami') return `You are ${currentUser?.displayName || 'User'} (${currentUser?.uid || 'unknown'}).`;
+      if (cmd === 'serverinfo') {
+        const srv = servers[currentServerId] || {};
+        const channelCount = Object.values(channels).filter(c => c.serverId === currentServerId).length;
+        const memberCount = getCurrentServerMemberCount(currentServerId);
+        return `Server: ${srv.name || 'Unknown'}\nMembers: ${memberCount}\nChannels: ${channelCount}`;
+      }
+      if (cmd === 'choose') {
+        const options = rest.split('|').map(x => x.trim()).filter(Boolean);
+        if (options.length < 2) return 'Usage: /choose option1 | option2 | option3';
+        return `I choose: ${pickRandom(options)}`;
+      }
+      if (cmd === 'roll') {
+        const parsed = parseDiceRoll(rest);
+        if (!parsed) return 'Usage: /roll XdY (example: /roll 2d6)';
+        const values = [];
+        for (let i = 0; i < parsed.count; i++) values.push(1 + Math.floor(Math.random() * parsed.sides));
+        const total = values.reduce((a, b) => a + b, 0);
+        return `Rolled ${parsed.count}d${parsed.sides}: ${values.join(', ')} (total ${total})`;
+      }
+      return null;
+    }
+
+    async function reviewPublicReportAndMaybeSuspend(reportId, reportData) {
+      if (!reportId || !reportData || currentServerId !== PUBLIC_SERVER_ID) return;
+      const reportedUserId = reportData.reportedUserId;
+      if (!reportedUserId || reportedUserId === BOT_USER_ID) return;
+      try {
+        ensureGlobalBotProfile().catch(() => {});
+        ensureBotMembership(PUBLIC_SERVER_ID).catch(() => {});
+        const reason = String(reportData.reason || 'Other');
+        const details = String(reportData.details || '');
+        const prompt = [
+          'You are a strict moderation reviewer for a public chat.',
+          'Return only JSON with keys: action, minutes, reason.',
+          'action must be "none" or "suspend".',
+          'minutes must be an integer 0..1440.',
+          `Report reason: ${reason}`,
+          `Report details: ${details || '(none)'}`,
+          'Suspend only when content indicates clear harassment, hate, threats, or spam abuse.'
+        ].join('\n');
+        const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${MISTRAL_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: BOT_MODEL,
+            temperature: 0.1,
+            max_tokens: 180,
+            messages: [
+              { role: 'system', content: 'Output only valid minified JSON.' },
+              { role: 'user', content: prompt }
+            ]
+          })
+        });
+        if (!res.ok) throw new Error('Review unavailable');
+        const data = await res.json();
+        const targetChannelId = currentChannelId || (Object.values(channels).find(c => c.serverId === PUBLIC_SERVER_ID)?.id || '');
+        const raw = (extractMistralText(data?.choices?.[0]?.message?.content) || '{}').replace(/```json|```/gi, '').trim();
+        let parsed = {};
+        try { parsed = JSON.parse(raw); } catch (_) { parsed = {}; }
+        const action = String(parsed.action || 'none').toLowerCase();
+        const minutes = Math.max(0, Math.min(1440, Math.floor(Number(parsed.minutes || 0))));
+        const reviewReason = String(parsed.reason || reason || 'Policy violation').slice(0, 180);
+        if (action === 'suspend' && minutes > 0) {
+          const untilMs = Date.now() + (minutes * 60 * 1000);
+          await setDoc(doc(db, 'servers', PUBLIC_SERVER_ID, 'suspended', reportedUserId), {
+            userId: reportedUserId,
+            reason: `[BOT-AUTO] ${reviewReason}`,
+            reviewSource: 'public-report-bot',
+            suspendedBy: currentUser.uid,
+            suspendedAt: serverTimestamp(),
+            untilMs
+          }, { merge: true });
+          await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, `Report reviewed: user suspended for ${minutes} minute(s). Reason: ${reviewReason}`);
+        } else {
+          await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, 'Report reviewed: no suspension applied.');
+        }
+      } catch (err) {
+        if (DEBUG_MODE) console.error('Public report review failed', err);
+      }
+    }
+
     async function askMistral(prompt, userId = currentUser?.uid) {
       const memory = await getBotMemory(userId);
       const memoryText = memory.length
@@ -985,7 +1152,7 @@
           temperature: 0.6,
           max_tokens: 450,
           messages: [
-            { role: 'system', content: 'You are a concise Discord assistant bot. Use clean formatting. If listing items, use clear bullets or numbering.' },
+            { role: 'system', content: `You are a concise Discord assistant bot. Use clean formatting. If listing items, use clear bullets or numbering. Only mention these supported commands if asked: ${BOT_COMMAND_HELP.join(' | ')}. Never suggest commands outside this list.` },
             { role: 'system', content: `User memory:\n${memoryText}` },
             { role: 'user', content: prompt }
           ]
@@ -1009,6 +1176,12 @@
         // Best effort only: these writes can be blocked by Firestore rules.
         ensureGlobalBotProfile().catch(() => {});
         ensureBotMembership(currentServerId).catch(() => {});
+        const builtIn = runBuiltInBotCommand(prompt);
+        if (builtIn) {
+          await sendBotMessage(currentServerId, currentChannelId, builtIn);
+          saveBotMemory(currentUser?.uid, prompt, builtIn).catch(() => {});
+          return true;
+        }
         const reply = await askMistral(prompt, currentUser?.uid);
         await sendBotMessage(currentServerId, currentChannelId, reply);
         saveBotMemory(currentUser?.uid, prompt, reply).catch(() => {});
@@ -1587,6 +1760,8 @@
         const chRef = doc(collection(db, 'channels'));
         await setDoc(chRef, { serverId: PUBLIC_SERVER_ID, name: 'general', createdAt: serverTimestamp() });
       }
+      ensureGlobalBotProfile().catch(() => {});
+      ensureBotMembership(PUBLIC_SERVER_ID).catch(() => {});
     }
 
     async function ensurePublicMembership() {
@@ -1804,7 +1979,7 @@
       let prevUserId = null;
       arr.forEach((m) => {
         const liveUser = memberUserData[m.userId] || {};
-        const displayName = getUserDisplayName(liveUser, m) || 'Unknown';
+        const displayName = getUserDisplayName(liveUser, m) || (m.userId === BOT_USER_ID || m.isBot ? BOT_DISPLAY_NAME : 'Unknown');
         const isBot = m.userId === BOT_USER_ID || liveUser?.isBot || m.isBot;
         const avatarUrl = (liveUser.photoURL || m.photoURL || '').trim();
         const isOwn = m.userId === currentUser?.uid;
@@ -2351,9 +2526,12 @@
       activeMemberProfileUserId = userId;
       const memberData = memberUserData[userId] || {};
       const memberRole = Object.values(members).find(m => m.serverId === currentServerId && m.userId === userId);
-      const name = getUserDisplayName(memberData, memberRole) || 'Unknown';
-      const bio = (memberData?.bio || '').trim();
-      const role = servers[currentServerId]?.ownerId === userId ? 'Owner' : memberRole?.role === 'admin' ? 'Admin' : 'Member';
+      const isBotProfile = userId === BOT_USER_ID || memberData?.isBot || memberRole?.role === 'bot';
+      const name = getUserDisplayName(memberData, memberRole) || (isBotProfile ? BOT_DISPLAY_NAME : 'Unknown');
+      const bio = isBotProfile
+        ? (memberData?.bio || 'Server assistant bot. Mention bot/ai/mistral or use /help for supported commands.')
+        : (memberData?.bio || '').trim();
+      const role = isBotProfile ? 'Bot' : (servers[currentServerId]?.ownerId === userId ? 'Owner' : memberRole?.role === 'admin' ? 'Admin' : 'Member');
       const canReport = !!currentUser?.uid && userId !== currentUser.uid && userId !== BOT_USER_ID;
       modal.open('Member Profile', `
         <div class="space-y-4">
@@ -2371,6 +2549,10 @@
             <div class="text-xs uppercase tracking-wide text-gray-500 mb-1">About</div>
             <div class="text-sm text-gray-300 bg-discord-dark rounded p-3">${escapeHtml(bio || 'No description set.')}</div>
           </div>
+          ${isBotProfile ? `<div>
+            <div class="text-xs uppercase tracking-wide text-gray-500 mb-1">Supported Commands</div>
+            <div class="text-xs text-gray-300 bg-discord-dark rounded p-3">${BOT_COMMAND_HELP.map(c => escapeHtml(c)).join('<br>')}</div>
+          </div>` : ''}
           ${canReport ? '<button type="button" id="profile-report-user" class="w-full py-2 rounded bg-discord-red hover:bg-red-500 text-sm font-medium">Report User</button>' : ''}
         </div>
       `);
@@ -2387,8 +2569,9 @@
         .forEach(m => {
           const ud = memberUserData[m.userId] || {};
           const status = getEffectivePresenceStatus(m.userId);
-          const displayName = getUserDisplayName(ud, m) || 'Unknown';
-          const roleLabel = srv?.ownerId === m.userId ? ' (Owner)' : m.role === 'admin' ? ' (Admin)' : '';
+          const isBotMember = m.userId === BOT_USER_ID || ud?.isBot || m.role === 'bot';
+          const displayName = getUserDisplayName(ud, m) || (isBotMember ? BOT_DISPLAY_NAME : 'Unknown');
+          const roleLabel = isBotMember ? ' (Bot)' : (srv?.ownerId === m.userId ? ' (Owner)' : m.role === 'admin' ? ' (Admin)' : '');
           const div = document.createElement('div');
           div.className = 'flex items-center gap-2 px-2 py-1.5 rounded hover:bg-discord-dark cursor-pointer';
           div.innerHTML = `

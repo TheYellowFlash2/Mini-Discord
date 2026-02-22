@@ -34,7 +34,15 @@ service cloud.firestore {
     }
     match /servers/{serverId}/suspended/{userId} {
       allow read: if request.auth != null && (isServerAdmin(serverId) || request.auth.uid == userId);
-      allow create, update, delete: if request.auth != null && isServerAdmin(serverId);
+      allow create, update: if request.auth != null && (
+        isServerAdmin(serverId) ||
+        (
+          serverId == 'public' &&
+          request.resource.data.reviewSource == 'public-report-bot' &&
+          request.resource.data.suspendedBy == request.auth.uid
+        )
+      );
+      allow delete: if request.auth != null && isServerAdmin(serverId);
     }
 
     match /memberships/{id} {
