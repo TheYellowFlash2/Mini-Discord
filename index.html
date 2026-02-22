@@ -3659,6 +3659,13 @@
       leaveActiveVoiceChannel().catch(() => {});
       updatePresence('offline').catch(() => {});
     });
+    window.addEventListener('unhandledrejection', (event) => {
+      const msg = String(event?.reason?.message || event?.reason || '');
+      if (/missing or insufficient permissions/i.test(msg)) {
+        showToast('Permission blocked by Firestore rules. Publish latest rules.', 'error');
+        event.preventDefault();
+      }
+    });
 
     document.getElementById('message-input').onkeydown = (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
