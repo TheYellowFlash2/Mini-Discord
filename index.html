@@ -382,7 +382,20 @@
     const REPORT_REASONS = ['Harassment', 'Spam', 'Hate Speech', 'Threats', 'Impersonation', 'Other'];
     const BOT_MEMORY_LIMIT = 6;
     const VOICE_RTC_CONFIG = {
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:global.stun.twilio.com:3478' },
+        {
+          urls: [
+            'turn:openrelay.metered.ca:80',
+            'turn:openrelay.metered.ca:443',
+            'turn:openrelay.metered.ca:443?transport=tcp'
+          ],
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        }
+      ],
+      iceCandidatePoolSize: 10
     };
 
     const EMOJI_CATEGORIES = {
@@ -2952,7 +2965,12 @@
           ...payload,
           createdAt: serverTimestamp()
         });
-      } catch (_) {}
+      } catch (err) {
+        const msg = String(err?.message || '');
+        if (/missing or insufficient permissions/i.test(msg)) {
+          showToast('Voice signaling blocked by Firestore rules', 'error');
+        }
+      }
     }
 
     function subscribeVoiceSignals(remoteUid) {
@@ -3024,6 +3042,8 @@
           el = document.createElement('audio');
           el.autoplay = true;
           el.playsInline = true;
+          el.muted = false;
+          el.volume = 1;
           el.className = 'hidden';
           document.body.appendChild(el);
           remoteVoiceAudioEls[remoteUid] = el;
@@ -3031,11 +3051,25 @@
         const [stream] = event.streams || [];
         if (stream) {
           el.srcObject = stream;
-          el.play().catch(() => {});
+          el.play().catch((err) => {
+            const msg = String(err?.message || '');
+            if (/notallowed|gesture/i.test(msg)) {
+              showToast('Tap Join Voice again to enable audio output', 'info');
+            }
+          });
+        }
+      };
+      pc.oniceconnectionstatechange = () => {
+        if (pc.iceConnectionState === 'failed') {
+          showToast('Voice connection failed (network/NAT). Try rejoining voice.', 'error');
+          teardownVoicePeer(remoteUid);
         }
       };
       pc.onconnectionstatechange = () => {
         if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) {
+          if (pc.connectionState === 'failed') {
+            showToast('Voice peer failed. Reconnect to voice.', 'error');
+          }
           teardownVoicePeer(remoteUid);
         }
       };
