@@ -222,12 +222,14 @@
     let unsubMyMemberships = null;
     let unsubReports = null;
     let unsubActiveSuspension = null;
+    let unsubServerBannedAccounts = null;
     let reportAlertInitialized = false;
     const seenReportAlerts = new Set();
     let openReports = {};
     let lastSuspensionNoticeKey = '';
     let isHandlingPublicSuspensionRedirect = false;
     let lastSafeBriefingKey = '';
+    let serverBannedAccounts = {};
     let serversLoadVersion = 0;
     let membersLoadVersion = 0;
     let presenceInterval = null;
@@ -640,6 +642,20 @@
       };
     }
 
+    function toBehaviorSummary(reason = '', details = '') {
+      const r = String(reason || '').trim();
+      const d = String(details || '').trim();
+      const combined = `${r} ${d}`.toLowerCase();
+      if (/harass|insult|threat|bully|slur|hate|abuse|name/.test(combined)) return 'You called someone names or used abusive language.';
+      if (/spam|flood|repeat|advert|promo|link/.test(combined)) return 'You repeatedly posted spam or disruptive messages.';
+      if (/nsfw|sexual|explicit|image|photo/.test(combined)) return 'You shared inappropriate content.';
+      if (/impersonat|fake|scam|fraud/.test(combined)) return 'You appeared to impersonate or mislead others.';
+      if (/privacy|dox|personal|address|phone/.test(combined)) return 'You shared or requested private personal information.';
+      if (/self-harm|suicide|violence|kill|attack/.test(combined)) return 'You posted harmful or dangerous content.';
+      if (r) return `You were reported for ${r.toLowerCase()}.`;
+      return 'You were reported for behavior that broke server rules.';
+    }
+
     function getUserDisplayName(userData, memberData) {
       return (userData?.displayName || userData?.username || memberData?.displayName || memberData?.username || '').trim();
     }
@@ -817,6 +833,168 @@
         .trim();
     }
 
+    function normalizeAccountName(name = '') {
+      return String(name || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9_.-]/g, '')
+        .trim();
+    }
+
+    function accountBanDocId(type, value) {
+      return `${type}:${String(value || '').toLowerCase().trim()}`;
+    }
+
+    async function addGlobalAccountBanToken(type, value, reason = 'Banned') {
+      const normalized = String(value || '').toLowerCase().trim();
+      if (!normalized) return;
+      await setDoc(doc(db, 'bannedAccounts', accountBanDocId(type, normalized)), {
+        type,
+        value: normalized,
+        reason: String(reason || 'Banned').slice(0, 180),
+        createdAt: serverTimestamp(),
+        createdBy: currentUser?.uid || 'system'
+      }, { merge: true });
+    }
+
+    async function isGloballyBannedIdentity({ email = '', username = '' } = {}) {
+      const checks = [];
+      const e = String(email || '').toLowerCase().trim();
+      const u = normalizeAccountName(username);
+      if (e) checks.push(getDoc(doc(db, 'bannedAccounts', accountBanDocId('email', e))));
+      if (u) checks.push(getDoc(doc(db, 'bannedAccounts', accountBanDocId('username', u))));
+      if (!checks.length) return false;
+      const results = await Promise.all(checks.map(p => p.catch(() => ({ exists: () => false }))));
+      return results.some(r => r?.exists?.());
+    }
+
+    async function addServerBannedAccountName(serverId, name, reason = 'Banned account name') {
+      if (!serverId) return;
+      const normalized = normalizeAccountName(name);
+      if (!normalized) return;
+      await setDoc(doc(db, 'servers', serverId, 'bannedAccounts', normalized), {
+        normalized,
+        displayName: String(name || '').trim().slice(0, 60),
+        reason: String(reason || 'Banned account name').slice(0, 180),
+        addedBy: currentUser?.uid || 'system',
+        source: 'manual',
+        createdAt: serverTimestamp()
+      }, { merge: true });
+    }
+
+    async function isBannedNameForServer(serverId, name) {
+      if (!serverId || !name) return false;
+      const normalized = normalizeAccountName(name);
+      if (!normalized) return false;
+      try {
+        const snap = await getDoc(doc(db, 'servers', serverId, 'bannedAccounts', normalized));
+        return snap.exists();
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function stopServerBannedAccountsWatcher() {
+      if (!unsubServerBannedAccounts) return;
+      unsubServerBannedAccounts();
+      unsubServerBannedAccounts = null;
+      serverBannedAccounts = {};
+    }
+
+    function renderAdminBannedAccountList() {
+      const host = document.getElementById('admin-ban-name-list');
+      if (!host) return;
+      const rows = Object.values(serverBannedAccounts)
+        .sort((a, b) => {
+          const at = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : 0;
+          const bt = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0;
+          return bt - at;
+        })
+        .map((entry) => {
+          const label = entry.displayName || entry.normalized || entry.id || 'unknown';
+          const reason = (entry.reason || 'Blocked account').trim();
+          return `
+            <div class="flex items-center justify-between gap-2 rounded bg-discord-darkest/40 px-2 py-1.5">
+              <div class="min-w-0">
+                <div class="text-xs text-gray-200 truncate">${escapeHtml(label)}</div>
+                <div class="text-[11px] text-gray-500 truncate">${escapeHtml(reason)}</div>
+              </div>
+              <button type="button" class="text-[11px] px-2 py-1 rounded bg-discord-dark hover:bg-discord-darker" data-unblock-name="${escapeHtml(entry.id || '')}">Unblock</button>
+            </div>
+          `;
+        }).join('');
+      host.innerHTML = rows || '<p class="text-xs text-gray-500 py-1">No blocked names</p>';
+      host.querySelectorAll('[data-unblock-name]').forEach((btn) => {
+        btn.onclick = async () => {
+          const id = normalizeAccountName(btn.dataset.unblockName || '');
+          if (!id || !currentServerId || !isAdmin()) return;
+          try {
+            await deleteDoc(doc(db, 'servers', currentServerId, 'bannedAccounts', id));
+            showToast('Name unblocked', 'success');
+          } catch (err) {
+            showToast(err?.message || 'Failed to unblock name', 'error');
+          }
+        };
+      });
+    }
+
+    function subscribeServerBannedAccounts(serverId) {
+      stopServerBannedAccountsWatcher();
+      if (!serverId || !currentUser?.uid) return;
+      unsubServerBannedAccounts = onSnapshot(collection(db, 'servers', serverId, 'bannedAccounts'), (snap) => {
+        const next = {};
+        snap.docs.forEach(d => { next[d.id] = { id: d.id, ...d.data() }; });
+        serverBannedAccounts = next;
+        renderAdminBannedAccountList();
+        if (normalizeAccountName(currentUser.displayName) && next[normalizeAccountName(currentUser.displayName)]) {
+          if (serverId === currentServerId) {
+            showToast('Your account name is blocked from this server', 'error');
+            if (serverId === PUBLIC_SERVER_ID) {
+              getActiveSuspension(PUBLIC_SERVER_ID, currentUser.uid).then((s) => redirectSuspendedUserFromPublic(s || { untilMs: Date.now() + 15 * 60 * 1000, reason: 'Blocked account name' })).catch(() => {});
+            } else if (servers[PUBLIC_SERVER_ID]) {
+              selectServer(PUBLIC_SERVER_ID);
+            }
+          }
+        }
+      }, () => {});
+    }
+
+    async function analyzeImageModeration(imageUrl) {
+      if (!imageUrl || !MISTRAL_API_KEY) return { flagged: false, reason: '' };
+      try {
+        const prompt = 'Check this image for explicit sexual nudity, child sexual content, or graphic sexual abuse. Return only JSON: {"flagged":true|false,"reason":"short reason"}.';
+        const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${MISTRAL_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: BOT_MODEL,
+            temperature: 0,
+            max_tokens: 120,
+            messages: [
+              { role: 'system', content: 'Return strict JSON only.' },
+              {
+                role: 'user',
+                content: [
+                  { type: 'text', text: prompt },
+                  { type: 'image_url', image_url: imageUrl }
+                ]
+              }
+            ]
+          })
+        });
+        if (!res.ok) return { flagged: false, reason: '' };
+        const data = await res.json();
+        const raw = extractJsonObjectFromText(extractMistralText(data?.choices?.[0]?.message?.content) || '{}');
+        let parsed = {};
+        try { parsed = JSON.parse(raw); } catch (_) { parsed = {}; }
+        return { flagged: !!parsed.flagged, reason: String(parsed.reason || 'Inappropriate image').slice(0, 180) };
+      } catch (_) {
+        return { flagged: false, reason: '' };
+      }
+    }
+
     function hasEvidenceMatch(details = '', evidenceMessages = []) {
       const detailNorm = normalizeModerationText(details);
       if (!detailNorm || detailNorm.length < 8) return false;
@@ -986,7 +1164,7 @@
       const reason = String(suspension?.reason || 'Policy violation').replace(/^\[BOT-AUTO\]\s*/i, '').trim();
       const ends = untilMs ? new Date(untilMs).toLocaleString() : 'Unknown';
       const reportLines = recentReports.length
-        ? recentReports.map((r, i) => `- Report ${i + 1}: ${String(r.reason || 'Other')} | ${String(r.details || 'No details').slice(0, 120)}`).join('\n')
+        ? recentReports.map((r, i) => `- Report ${i + 1}: ${toBehaviorSummary(r.reason, r.details)}`).join('\n')
         : '- No specific report text was found.';
       const msg = [
         `You were suspended from Public.`,
@@ -1592,9 +1770,23 @@
 
     async function signUp(email, password, displayName) {
       try {
+        const signupName = (displayName || email.split('@')[0] || 'User').trim();
+        const bannedBefore = await isGloballyBannedIdentity({ email, username: signupName });
+        if (bannedBefore) {
+          showToast('This account is banned and cannot sign up.', 'error');
+          return;
+        }
         const cred = await createUserWithEmailAndPassword(auth, email, password);
+        const bannedAfter = await isGloballyBannedIdentity({ email, username: signupName });
+        if (bannedAfter) {
+          try { await firebaseDeleteUser(cred.user); } catch (_) {}
+          showToast('This account is banned and cannot sign up.', 'error');
+          return;
+        }
         await setDoc(doc(db, 'users', cred.user.uid), {
-          displayName: displayName || email.split('@')[0],
+          displayName: signupName,
+          displayNameNormalized: normalizeAccountName(signupName),
+          email: String(email || '').toLowerCase().trim(),
           bio: '',
           photoURL: '',
           createdAt: serverTimestamp(),
@@ -1633,7 +1825,7 @@
       document.getElementById('main-app').classList.add('hidden');
     }
 
-    async function deleteMyAccount() {
+    async function deleteMyAccount(options = {}) {
       if (!currentUser?.uid) return;
       const uid = currentUser.uid;
       const authUser = auth.currentUser;
@@ -1642,9 +1834,10 @@
         return;
       }
       try {
+        const skipOwnedCheck = !!options.skipOwnedCheck;
         const ownedServers = await getDocs(query(collection(db, 'servers'), where('ownerId', '==', uid)));
         const ownedNonPublic = ownedServers.docs.filter(d => d.id !== PUBLIC_SERVER_ID);
-        if (ownedNonPublic.length > 0) {
+        if (!skipOwnedCheck && ownedNonPublic.length > 0) {
           showToast('Transfer/delete owned servers before deleting account', 'error');
           return;
         }
@@ -1688,6 +1881,56 @@
           showToast('Please log out and log back in, then delete account.', 'error');
           return;
         }
+        showToast(err?.message || 'Failed to delete account', 'error');
+      }
+    }
+
+    async function enforcePolicyAccountDeletion(reason = 'Policy violation') {
+      if (!currentUser?.uid) return;
+      const email = String(auth.currentUser?.email || '').toLowerCase().trim();
+      const username = normalizeAccountName(currentUser.displayName || '');
+      try {
+        if (email) await addGlobalAccountBanToken('email', email, reason);
+        if (username) await addGlobalAccountBanToken('username', username, reason);
+        if (currentServerId) await addServerBannedAccountName(currentServerId, currentUser.displayName || username, reason);
+      } catch (_) {}
+      await deleteMyAccount({ skipOwnedCheck: true });
+    }
+
+    async function adminDeleteAccountNow(targetUserId) {
+      if (!currentServerId || !isAdmin() || !targetUserId || targetUserId === currentUser?.uid || targetUserId === BOT_USER_ID) return;
+      try {
+        const userSnap = await getDoc(doc(db, 'users', targetUserId));
+        const userData = userSnap.exists() ? userSnap.data() : {};
+        const displayName = getUserDisplayName(userData, {}) || 'User';
+        const normalized = normalizeAccountName(displayName);
+        const email = String(userData?.email || '').toLowerCase().trim();
+        if (normalized) {
+          await addServerBannedAccountName(currentServerId, displayName, 'Admin account delete');
+          await addGlobalAccountBanToken('username', normalized, 'Admin account delete');
+        }
+        if (email) await addGlobalAccountBanToken('email', email, 'Admin account delete');
+        const membershipsSnap = await getDocs(query(collection(db, 'memberships'), where('userId', '==', targetUserId)));
+        for (const mem of membershipsSnap.docs) {
+          const sid = mem.data()?.serverId;
+          if (sid) {
+            try { await deleteDoc(doc(db, 'servers', sid, 'members', targetUserId)); } catch (_) {}
+            try { await deleteDoc(doc(db, 'servers', sid, 'banned', targetUserId)); } catch (_) {}
+            try { await deleteDoc(doc(db, 'servers', sid, 'suspended', targetUserId)); } catch (_) {}
+          }
+          await deleteDoc(mem.ref);
+        }
+        const msgSnap = await getDocs(query(collection(db, 'messages'), where('userId', '==', targetUserId)));
+        for (const m of msgSnap.docs) {
+          try { await deleteMessageWithAttachments(m.id, m.data()); } catch (_) {}
+        }
+        const reportSnap = await getDocs(query(collection(db, 'reports'), where('reportedBy', '==', targetUserId)));
+        for (const r of reportSnap.docs) await deleteDoc(r.ref);
+        try { await deleteDoc(doc(db, 'botMemory', targetUserId)); } catch (_) {}
+        try { await deleteDoc(doc(db, 'users', targetUserId)); } catch (_) {}
+        showToast('Account data deleted and banned by username', 'success');
+        loadMembers();
+      } catch (err) {
         showToast(err?.message || 'Failed to delete account', 'error');
       }
     }
@@ -1796,6 +2039,13 @@
           const r = ref(storage, `users/${currentUser.uid}/avatar`);
           await uploadBytes(r, file);
           const url = await getDownloadURL(r);
+          const moderation = await analyzeImageModeration(url);
+          if (moderation.flagged) {
+            try { await deleteObject(r); } catch (_) {}
+            showToast('Inappropriate image detected. Account removed.', 'error');
+            await enforcePolicyAccountDeletion(moderation.reason || 'Inappropriate image');
+            return;
+          }
           await updateDoc(doc(db, 'users', currentUser.uid), { photoURL: url });
           currentUser.photoURL = url;
           img.src = url; img.style.display = 'block'; document.getElementById('profile-avatar-initial').style.display = 'none';
@@ -1976,6 +2226,8 @@
       const invData = inv.data();
       const bannedSnap = await getDoc(doc(db, 'servers', invData.serverId, 'banned', currentUser.uid));
       if (bannedSnap.exists()) { showToast('You are banned from this server', 'error'); return; }
+      const isNameBanned = await isBannedNameForServer(invData.serverId, currentUser.displayName || '');
+      if (isNameBanned) { showToast('Your account name is blocked from this server', 'error'); return; }
       const activeSuspension = await getActiveSuspension(invData.serverId, currentUser.uid);
       if (activeSuspension) {
         showSuspensionLockModal(servers[invData.serverId]?.name || 'this server', activeSuspension);
@@ -2011,12 +2263,23 @@
       showToast('Left server', 'info');
       currentServerId = null; currentChannelId = null;
       stopActiveSuspensionWatcher();
+      stopServerBannedAccountsWatcher();
       loadServers();
       renderChannelList();
       renderMessages();
     }
 
     async function selectServer(serverId) {
+      const nameBlocked = await isBannedNameForServer(serverId, currentUser?.displayName || '');
+      if (nameBlocked) {
+        showToast('Your account name is blocked from this server', 'error');
+        if (serverId === PUBLIC_SERVER_ID) {
+          await redirectSuspendedUserFromPublic({ untilMs: Date.now() + 15 * 60 * 1000, reason: 'Blocked account name' });
+        } else if (servers[PUBLIC_SERVER_ID] && currentServerId !== PUBLIC_SERVER_ID) {
+          selectServer(PUBLIC_SERVER_ID);
+        }
+        return;
+      }
       const suspension = await getActiveSuspension(serverId, currentUser?.uid);
       if (suspension) {
         const serverName = servers[serverId]?.name || 'this server';
@@ -2645,7 +2908,7 @@
                 ${isOwner && m.role === 'admin' ? `<button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-discord-red" data-remove-admin="${m.userId}">Remove Admin</button>` : ''}
                 <button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-amber-600" data-suspend="${m.userId}">Suspend</button>
                 <button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-amber-600" data-kick="${m.userId}">Kick</button>
-                <button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-discord-red" data-ban="${m.userId}">Ban</button>
+                <button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-discord-red" data-delete-account="${m.userId}">Delete Account</button>
               </div>
             ` : ''}
           </div>
@@ -2667,6 +2930,14 @@
             <h3 class="text-sm font-semibold text-gray-400 mb-2">Channels</h3>
             <div class="space-y-0">${channelRows || '<p class="text-gray-500 py-2">No channels</p>'}</div>
             <button type="button" id="admin-create-channel" class="mt-2 text-sm px-3 py-1.5 rounded bg-discord-blurple hover:bg-indigo-600">+ Create Channel</button>
+          </div>
+          <div>
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">Banned Account List</h3>
+            <div class="flex gap-2 mb-2">
+              <input id="admin-ban-name-input" type="text" placeholder="Username to block" class="flex-1 bg-discord-dark border border-discord-darkest rounded px-2 py-1.5 text-sm outline-none focus:border-discord-blurple">
+              <button type="button" id="admin-ban-name-add" class="text-xs px-3 py-1.5 rounded bg-discord-red hover:bg-red-500">Block</button>
+            </div>
+            <div id="admin-ban-name-list" class="max-h-40 overflow-y-auto space-y-1"></div>
           </div>
           <div>
             <h3 class="text-sm font-semibold text-gray-400 mb-2">Reports Inbox</h3>
@@ -2705,15 +2976,37 @@
           ` : ''}
         </div>
       `);
-      document.querySelectorAll('[data-ban]').forEach(btn => btn.onclick = () => banUser(btn.dataset.ban));
       document.querySelectorAll('[data-kick]').forEach(btn => btn.onclick = () => kickUser(btn.dataset.kick));
       document.querySelectorAll('[data-suspend]').forEach(btn => btn.onclick = () => renderSuspendUserModal(btn.dataset.suspend));
       document.querySelectorAll('[data-make-admin]').forEach(btn => btn.onclick = () => makeAdmin(btn.dataset.makeAdmin));
       document.querySelectorAll('[data-remove-admin]').forEach(btn => btn.onclick = () => removeAdmin(btn.dataset.removeAdmin));
+      document.querySelectorAll('[data-delete-account]').forEach(btn => btn.onclick = async () => {
+        const targetId = btn.dataset.deleteAccount || '';
+        if (!targetId) return;
+        if (!confirm('Delete this account data now and block this username from this server?')) return;
+        await adminDeleteAccountNow(targetId);
+      });
       document.querySelectorAll('[data-delete-channel]').forEach(btn => btn.onclick = () => {
         if (confirm('Delete this channel?')) deleteChannel(btn.dataset.deleteChannel);
       });
       document.getElementById('admin-create-channel').onclick = () => { modal.closeModal(); renderCreateChannelModal(); };
+      const addBlockedNameBtn = document.getElementById('admin-ban-name-add');
+      if (addBlockedNameBtn) {
+        addBlockedNameBtn.onclick = async () => {
+          const input = document.getElementById('admin-ban-name-input');
+          const raw = String(input?.value || '').trim();
+          if (!raw) return;
+          if (!currentServerId || !isAdmin()) return;
+          try {
+            await addServerBannedAccountName(currentServerId, raw, 'Added by admin list');
+            showToast('Name blocked for this server', 'success');
+            input.value = '';
+          } catch (err) {
+            showToast(err?.message || 'Failed to block name', 'error');
+          }
+        };
+      }
+      renderAdminBannedAccountList();
       fetchOpenReportsForCurrentServer()
         .then(() => renderAdminReportsInbox())
         .catch(() => {
@@ -2787,6 +3080,7 @@
       const loadVersion = ++membersLoadVersion;
       if (unsubMembers) { unsubMembers(); unsubMembers = null; }
       if (unsubReports) { unsubReports(); unsubReports = null; }
+      stopServerBannedAccountsWatcher();
       reportAlertInitialized = false;
       clearMemberUserListeners();
       members = {};
@@ -2794,6 +3088,7 @@
       userPresence = {};
       renderMembers();
       updateAdminButtonVisibility();
+      subscribeServerBannedAccounts(serverId);
       const q = query(collection(db, 'memberships'), where('serverId', '==', serverId));
       unsubMembers = onSnapshot(q, (snap) => {
         if (loadVersion !== membersLoadVersion || serverId !== currentServerId) return;
@@ -3111,6 +3406,15 @@
           size: file.size || 0,
           mimeType: file.type || 'application/octet-stream'
         };
+        if (attachment.type === 'image') {
+          const moderation = await analyzeImageModeration(url);
+          if (moderation.flagged) {
+            try { await deleteObject(r); } catch (_) {}
+            showToast('Inappropriate image detected. Account removed.', 'error');
+            await enforcePolicyAccountDeletion(moderation.reason || 'Inappropriate image');
+            return;
+          }
+        }
         pendingAttachments.push(attachment);
         const prev = document.getElementById('attachment-preview');
         prev.classList.remove('hidden');
@@ -3136,11 +3440,31 @@
 
     onAuthStateChanged(auth, async (user) => {
       if (user) {
+        const isBanned = await isGloballyBannedIdentity({
+          email: user.email || '',
+          username: user.displayName || ''
+        });
+        if (isBanned) {
+          showToast('This account is banned.', 'error');
+          await signOut(auth);
+          return;
+        }
         const userRef = doc(db, 'users', user.uid);
         const u = await getDoc(userRef);
         const existing = u.data() || {};
+        const stillBanned = await isGloballyBannedIdentity({
+          email: user.email || '',
+          username: existing.displayName || user.displayName || ''
+        });
+        if (stillBanned) {
+          showToast('This account is banned.', 'error');
+          await signOut(auth);
+          return;
+        }
         const ensuredProfile = {
           displayName: existing.displayName || user.displayName || user.email?.split('@')[0] || 'User',
+          displayNameNormalized: normalizeAccountName(existing.displayName || user.displayName || user.email?.split('@')[0] || 'User'),
+          email: String(existing.email || user.email || '').toLowerCase().trim(),
           photoURL: existing.photoURL || user.photoURL || '',
           bio: existing.bio || '',
           status: existing.status || 'offline'
@@ -3163,6 +3487,7 @@
         stopPresenceHeartbeat();
         stopAttachmentCleanupScheduler();
         stopActiveSuspensionWatcher();
+        stopServerBannedAccountsWatcher();
         if (unsubMyMemberships) { unsubMyMemberships(); unsubMyMemberships = null; }
         if (unsubMembers) { unsubMembers(); unsubMembers = null; }
         if (unsubReports) { unsubReports(); unsubReports = null; }
