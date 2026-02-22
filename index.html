@@ -194,7 +194,7 @@
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
     import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
     import { getFirestore, collection, doc, setDoc, getDoc, getDocs, addDoc, updateDoc, deleteDoc, query, where, orderBy, limit, startAfter, onSnapshot, serverTimestamp, increment } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
-    import { getStorage, ref, uploadBytes, getDownloadURL } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js';
+    import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js';
 
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
@@ -224,6 +224,8 @@
     const MESSAGE_LIMIT = 50;
     const PRESENCE_HEARTBEAT_MS = 30000;
     const PRESENCE_STALE_MS = 90000;
+    const ATTACHMENT_TTL_MS = 2 * 24 * 60 * 60 * 1000;
+    const ATTACHMENT_CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
     let pendingAttachments = [];
     const PUBLIC_SERVER_ID = 'public';
     const BOT_USER_ID = 'global-bot-mistral';
@@ -231,6 +233,7 @@
     const BOT_MODEL = 'pixtral-12b-2409';
     const PROFANITY_WORDS = ['fuck','fucking','shit','bitch','asshole','bastard','cunt','nigger','nigga','faggot','retard','whore','slut','dick','pussy'];
     const moderationCooldownByUser = {};
+    let attachmentCleanupInterval = null;
     let replyingTo = null;
     let activeMemberProfileUserId = null;
     const NOTIFICATION_PREF_KEY = 'mini_discord_notifications_enabled';
@@ -392,6 +395,148 @@
         }).join(' ').trim();
       }
       return String(content).trim();
+    }
+
+    function getAttachmentStoragePath(att) {
+      if (!att) return '';
+      if (att.storagePath) return att.storagePath;
+      const url = (att.url || '').trim();
+      if (!url.includes('firebasestorage.googleapis.com')) return '';
+      const m = url.match(/\/o\/([^?]+)/);
+      if (!m?.[1]) return '';
+      try { return decodeURIComponent(m[1]); } catch (_) { return ''; }
+    }
+
+    async function deleteAttachmentFromStorage(att) {
+      const storagePath = getAttachmentStoragePath(att);
+      if (!storagePath) return false;
+      try {
+        await deleteObject(ref(storage, storagePath));
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    async function deleteMessageWithAttachments(messageId, messageData) {
+      const data = messageData || messages[messageId];
+      if (!messageId || !data) return { filesDeleted: 0, messageDeleted: false };
+      let filesDeleted = 0;
+      for (const att of (data.attachments || [])) {
+        const deleted = await deleteAttachmentFromStorage(att);
+        if (deleted) filesDeleted++;
+      }
+      await deleteDoc(doc(db, 'messages', messageId));
+      return { filesDeleted, messageDeleted: true };
+    }
+
+    function getDurationMs(value, unit) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n <= 0) return 0;
+      if (unit === 'minutes') return n * 60 * 1000;
+      if (unit === 'days') return n * 24 * 60 * 60 * 1000;
+      return n * 60 * 60 * 1000;
+    }
+
+    async function deleteMessagesByFilter({ channelId = null, olderThanMs = null } = {}) {
+      if (!currentServerId || !currentUser?.uid) return { deleted: 0, filesDeleted: 0 };
+      const srv = servers[currentServerId];
+      if (srv?.ownerId !== currentUser.uid) {
+        showToast('Only server owner can run bulk message cleanup', 'error');
+        return { deleted: 0, filesDeleted: 0 };
+      }
+      const qBase = channelId
+        ? query(collection(db, 'messages'), where('channelId', '==', channelId))
+        : query(collection(db, 'messages'), where('serverId', '==', currentServerId));
+      const snap = await getDocs(qBase);
+      const cutoff = olderThanMs ? Date.now() - olderThanMs : 0;
+      const targetDocs = snap.docs.filter((d) => {
+        const data = d.data();
+        if (!olderThanMs) return true;
+        const at = data.createdAt?.toDate ? data.createdAt.toDate().getTime() : 0;
+        return at > 0 && at <= cutoff;
+      });
+      let deleted = 0;
+      let filesDeleted = 0;
+      for (const d of targetDocs) {
+        try {
+          const result = await deleteMessageWithAttachments(d.id, d.data());
+          if (result.messageDeleted) deleted++;
+          filesDeleted += result.filesDeleted;
+        } catch (_) {}
+      }
+      return { deleted, filesDeleted };
+    }
+
+    async function cleanupExpiredAttachments({ serverScoped = false } = {}) {
+      if (!currentUser?.uid) return { filesDeleted: 0, messagesUpdated: 0 };
+      if (serverScoped && !currentServerId) return { filesDeleted: 0, messagesUpdated: 0 };
+      const now = Date.now();
+      let qRef;
+      if (serverScoped) {
+        qRef = query(
+          collection(db, 'messages'),
+          where('serverId', '==', currentServerId),
+          limit(300)
+        );
+      } else {
+        qRef = query(
+          collection(db, 'messages'),
+          where('userId', '==', currentUser.uid),
+          limit(200)
+        );
+      }
+      const snap = await getDocs(qRef);
+      let filesDeleted = 0;
+      let messagesUpdated = 0;
+      for (const d of snap.docs) {
+        const data = d.data();
+        const messageExpiry = Number(data.attachmentExpiresAt || 0);
+        if (!messageExpiry || messageExpiry > now) continue;
+        const currentAttachments = data.attachments || [];
+        const keep = [];
+        let touched = false;
+        let nextExpiry = null;
+        for (const att of currentAttachments) {
+          const expiresAt = Number(att?.expiresAt || 0);
+          const storagePath = getAttachmentStoragePath(att);
+          const isExpiredManagedAttachment = !!storagePath && expiresAt > 0 && expiresAt <= now;
+          if (isExpiredManagedAttachment) {
+            const deleted = await deleteAttachmentFromStorage(att);
+            if (deleted) filesDeleted++;
+            touched = true;
+            continue;
+          }
+          keep.push(att);
+          if (storagePath && expiresAt > 0) {
+            nextExpiry = nextExpiry ? Math.min(nextExpiry, expiresAt) : expiresAt;
+          }
+        }
+        if (!touched) continue;
+        try {
+          await updateDoc(doc(db, 'messages', d.id), {
+            attachments: keep,
+            attachmentExpiresAt: nextExpiry || null,
+            editedAt: serverTimestamp()
+          });
+          messagesUpdated++;
+        } catch (_) {}
+      }
+      return { filesDeleted, messagesUpdated };
+    }
+
+    function startAttachmentCleanupScheduler() {
+      if (attachmentCleanupInterval) clearInterval(attachmentCleanupInterval);
+      cleanupExpiredAttachments().catch(() => {});
+      attachmentCleanupInterval = setInterval(() => {
+        cleanupExpiredAttachments().catch(() => {});
+      }, ATTACHMENT_CLEANUP_INTERVAL_MS);
+    }
+
+    function stopAttachmentCleanupScheduler() {
+      if (!attachmentCleanupInterval) return;
+      clearInterval(attachmentCleanupInterval);
+      attachmentCleanupInterval = null;
     }
 
     async function ensureGlobalBotProfile() {
@@ -558,6 +703,7 @@
     async function logOut() {
       try { await updatePresence('offline'); } catch (_) {}
       stopPresenceHeartbeat();
+      stopAttachmentCleanupScheduler();
       await signOut(auth);
       currentServerId = null;
       currentChannelId = null;
@@ -954,7 +1100,7 @@
       if (!isAdmin()) { showToast('Admin only', 'error'); return; }
       try {
         const msgs = await getDocs(query(collection(db, 'messages'), where('channelId', '==', channelId)));
-        for (const m of msgs.docs) await deleteDoc(doc(db, 'messages', m.id));
+        for (const m of msgs.docs) await deleteMessageWithAttachments(m.id, m.data());
         await deleteDoc(doc(db, 'channels', channelId));
         showToast('Channel deleted', 'info');
         if (currentChannelId === channelId) { currentChannelId = null; selectServer(currentServerId); }
@@ -1111,6 +1257,10 @@
         return;
       }
       try {
+        const expiringAttachments = pendingAttachments.filter(att => getAttachmentStoragePath(att) && Number(att.expiresAt) > 0);
+        const nextAttachmentExpiry = expiringAttachments.length
+          ? Math.min(...expiringAttachments.map(att => Number(att.expiresAt)))
+          : null;
         const msg = {
           serverId: currentServerId,
           channelId: currentChannelId,
@@ -1119,6 +1269,7 @@
           photoURL: currentUser.photoURL || '',
           text: text || '',
           attachments: [...pendingAttachments],
+          attachmentExpiresAt: nextAttachmentExpiry,
           replyTo: replyingTo ? { messageId: replyingTo.id, userId: replyingTo.userId, displayName: replyingTo.displayName, text: replyingTo.text } : null,
           createdAt: serverTimestamp()
         };
@@ -1282,8 +1433,8 @@
     async function deleteAnyMessage(msgId) {
       if (!isAdmin()) return;
       try {
-        await deleteDoc(doc(db, 'messages', msgId));
-        showToast('Message deleted', 'success');
+        const result = await deleteMessageWithAttachments(msgId);
+        showToast(`Message deleted (${result.filesDeleted} file(s) removed)`, 'success');
       } catch (e) { showToast(e.message, 'error'); }
     }
 
@@ -1337,6 +1488,30 @@
             <div class="space-y-0">${channelRows || '<p class="text-gray-500 py-2">No channels</p>'}</div>
             <button type="button" id="admin-create-channel" class="mt-2 text-sm px-3 py-1.5 rounded bg-discord-blurple hover:bg-indigo-600">+ Create Channel</button>
           </div>
+          ${isOwner ? `
+            <div>
+              <h3 class="text-sm font-semibold text-gray-400 mb-2">Message Cleanup (Owner)</h3>
+              <div class="space-y-3 rounded border border-discord-dark bg-discord-darkest/40 p-3">
+                <div class="flex flex-wrap items-center gap-2">
+                  <select id="admin-cleanup-scope" class="bg-discord-dark border border-discord-darkest rounded px-2 py-1 text-sm">
+                    <option value="channel">Current Channel</option>
+                    <option value="server">Whole Server</option>
+                  </select>
+                  <input id="admin-cleanup-age-value" type="number" min="1" value="24" class="w-20 bg-discord-dark border border-discord-darkest rounded px-2 py-1 text-sm">
+                  <select id="admin-cleanup-age-unit" class="bg-discord-dark border border-discord-darkest rounded px-2 py-1 text-sm">
+                    <option value="hours">hours</option>
+                    <option value="minutes">minutes</option>
+                    <option value="days">days</option>
+                  </select>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  <button type="button" id="admin-delete-older" class="text-xs px-3 py-1.5 rounded bg-amber-700 hover:bg-amber-600">Delete Older Than</button>
+                  <button type="button" id="admin-reset-messages" class="text-xs px-3 py-1.5 rounded bg-discord-red hover:bg-red-500">Reset Messages</button>
+                  <button type="button" id="admin-clean-expired-files" class="text-xs px-3 py-1.5 rounded bg-discord-dark hover:bg-discord-darker">Delete Expired Files Now</button>
+                </div>
+              </div>
+            </div>
+          ` : ''}
         </div>
       `);
       document.querySelectorAll('[data-ban]').forEach(btn => btn.onclick = () => banUser(btn.dataset.ban));
@@ -1347,6 +1522,51 @@
         if (confirm('Delete this channel?')) deleteChannel(btn.dataset.deleteChannel);
       });
       document.getElementById('admin-create-channel').onclick = () => { modal.closeModal(); renderCreateChannelModal(); };
+      if (isOwner) {
+        document.getElementById('admin-delete-older').onclick = async () => {
+          const scope = document.getElementById('admin-cleanup-scope').value;
+          const ageValue = document.getElementById('admin-cleanup-age-value').value;
+          const ageUnit = document.getElementById('admin-cleanup-age-unit').value;
+          const olderThanMs = getDurationMs(ageValue, ageUnit);
+          if (!olderThanMs) { showToast('Enter a valid age value', 'error'); return; }
+          if (scope === 'channel' && !currentChannelId) { showToast('Select a channel first', 'error'); return; }
+          const targetText = scope === 'server' ? 'entire server' : 'current channel';
+          if (!confirm(`Delete messages older than ${ageValue} ${ageUnit} in ${targetText}?`)) return;
+          try {
+            const result = await deleteMessagesByFilter({
+              channelId: scope === 'channel' ? currentChannelId : null,
+              olderThanMs
+            });
+            showToast(`Deleted ${result.deleted} message(s), removed ${result.filesDeleted} file(s)`, 'success');
+          } catch (err) {
+            showToast(err?.message || 'Cleanup failed', 'error');
+          }
+        };
+        document.getElementById('admin-reset-messages').onclick = async () => {
+          const scope = document.getElementById('admin-cleanup-scope').value;
+          if (scope === 'channel' && !currentChannelId) { showToast('Select a channel first', 'error'); return; }
+          const targetText = scope === 'server' ? 'entire server' : 'current channel';
+          if (!confirm(`Reset all messages in ${targetText}? This cannot be undone.`)) return;
+          try {
+            const result = await deleteMessagesByFilter({
+              channelId: scope === 'channel' ? currentChannelId : null,
+              olderThanMs: null
+            });
+            showToast(`Reset complete: ${result.deleted} message(s), ${result.filesDeleted} file(s) removed`, 'success');
+            modal.closeModal();
+          } catch (err) {
+            showToast(err?.message || 'Reset failed', 'error');
+          }
+        };
+        document.getElementById('admin-clean-expired-files').onclick = async () => {
+          try {
+            const result = await cleanupExpiredAttachments({ serverScoped: true });
+            showToast(`Expired cleanup: ${result.messagesUpdated} message(s), ${result.filesDeleted} file(s)`, 'info');
+          } catch (err) {
+            showToast(err?.message || 'Expired cleanup failed', 'error');
+          }
+        };
+      }
     }
 
     function updateAdminButtonVisibility() {
@@ -1638,12 +1858,17 @@
       const file = e.target.files?.[0];
       if (!file) return;
       try {
-        const r = ref(storage, `messages/${currentUser.uid}/${Date.now()}_${file.name}`);
+        const uploadAt = Date.now();
+        const storagePath = `messages/${currentUser.uid}/${uploadAt}_${file.name}`;
+        const r = ref(storage, storagePath);
         await uploadBytes(r, file, { contentType: file.type || 'application/octet-stream' });
         const url = await getDownloadURL(r);
         const attachment = {
           type: file.type.startsWith('image/') ? 'image' : 'file',
           url,
+          storagePath,
+          uploadedAt: uploadAt,
+          expiresAt: uploadAt + ATTACHMENT_TTL_MS,
           name: file.name || 'Attachment',
           size: file.size || 0,
           mimeType: file.type || 'application/octet-stream'
@@ -1691,12 +1916,14 @@
         updateUserPill();
         await updatePresence('online');
         startPresenceHeartbeat();
+        startAttachmentCleanupScheduler();
         loadServers();
         const params = new URLSearchParams(location.search);
         const invite = params.get('invite');
         if (invite) { renderJoinModal(); document.getElementById('invite-code').value = invite; }
       } else {
         stopPresenceHeartbeat();
+        stopAttachmentCleanupScheduler();
         if (unsubMyMemberships) { unsubMyMemberships(); unsubMyMemberships = null; }
         if (unsubMembers) { unsubMembers(); unsubMembers = null; }
         clearMemberUserListeners();
