@@ -458,7 +458,12 @@
       );
       unsubReports = onSnapshot(q, (snap) => {
         if (!reportAlertInitialized) {
-          snap.docs.forEach(d => seenReportAlerts.add(d.id));
+          snap.docs.forEach((d) => {
+            if (!seenReportAlerts.has(d.id)) {
+              seenReportAlerts.add(d.id);
+              maybeNotifyForReport(d.id, d.data());
+            }
+          });
           reportAlertInitialized = true;
           return;
         }
