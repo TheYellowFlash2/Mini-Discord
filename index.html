@@ -49,35 +49,30 @@
     .context-menu { min-width: 180px; }
     .context-item:hover { background: rgba(255,255,255,0.06); }
     @media (max-width: 767px) {
+      #mobile-nav { display: flex; }
       #main-app {
-        padding-bottom: calc(66px + env(safe-area-inset-bottom));
+        padding-top: calc(48px + env(safe-area-inset-top));
       }
+      #btn-members-toggle { display: none; }
+      #channel-header-name { margin-left: 0; }
       #server-sidebar {
         position: fixed;
         left: 0;
-        right: 0;
+        top: 0;
         bottom: 0;
-        top: auto;
-        width: 100vw;
-        height: calc(66px + env(safe-area-inset-bottom));
-        z-index: 75;
+        width: min(84vw, 330px);
+        z-index: 70;
         display: none;
-        flex-direction: row;
+        flex-direction: column;
         align-items: center;
         justify-content: flex-start;
-        gap: 8px;
-        padding: 8px 10px calc(8px + env(safe-area-inset-bottom)) 10px;
-        overflow-x: auto;
-        overflow-y: hidden;
-        border-top: 1px solid rgba(255,255,255,0.08);
+        padding: calc(12px + env(safe-area-inset-top)) 10px calc(12px + env(safe-area-inset-bottom)) 10px;
+        overflow-y: auto;
       }
       #server-sidebar:not(.hidden) { display: flex; }
       #server-sidebar #server-list {
         display: flex;
-        flex-direction: row;
-      }
-      #server-sidebar button {
-        flex: 0 0 auto;
+        flex-direction: column;
       }
       #channel-sidebar {
         position: fixed;
@@ -99,18 +94,10 @@
         display: none;
       }
       #members-sidebar:not(.hidden) { display: flex; }
-      #btn-toggle-channel {
-        top: max(8px, env(safe-area-inset-top));
-        left: 56px;
-      }
-      #btn-toggle-servers {
-        top: max(8px, env(safe-area-inset-top));
-        left: 8px;
-      }
       #messages-container {
         padding-left: 10px;
         padding-right: 10px;
-        padding-top: 44px;
+        padding-top: 8px;
       }
       #message-input-area {
         padding-bottom: calc(12px + env(safe-area-inset-bottom));
@@ -118,9 +105,6 @@
       #voice-channel-panel {
         padding-left: 10px;
         padding-right: 10px;
-      }
-      #channel-header-name {
-        margin-left: 86px;
       }
     }
   </style>
@@ -196,8 +180,11 @@
         </div>
       </aside>
 
-      <button id="btn-toggle-channel" class="md:hidden fixed top-4 left-16 z-40 bg-discord-dark p-2 rounded">☰</button>
-      <button id="btn-toggle-servers" class="md:hidden fixed top-4 left-4 z-40 bg-discord-dark p-2 rounded">☷</button>
+      <div id="mobile-nav" class="md:hidden fixed top-2 left-2 right-2 z-40 hidden gap-2">
+        <button id="btn-toggle-servers" class="flex-1 bg-discord-dark px-3 py-2 rounded text-sm font-medium">Servers</button>
+        <button id="btn-toggle-channel" class="flex-1 bg-discord-dark px-3 py-2 rounded text-sm font-medium">Channels</button>
+        <button id="btn-toggle-members" class="flex-1 bg-discord-dark px-3 py-2 rounded text-sm font-medium">Members</button>
+      </div>
 
       <main class="flex-1 flex flex-col min-w-0 bg-discord-dark">
         <header class="h-12 px-4 flex items-center border-b border-discord-dark shadow-sm flex-shrink-0">
@@ -559,7 +546,7 @@
           renderServerList();
           return;
         }
-        const count = snap.size;
+        const count = snap.docs.filter((d) => (d.data()?.userId || '') !== currentUser?.uid).length;
         unreadCountsByChannel[channelId] = count;
         renderChannelList();
         renderServerList();
@@ -4096,9 +4083,10 @@
         backdrop.classList.add('hidden');
         return;
       }
+      const serversOpen = !document.getElementById('server-sidebar').classList.contains('hidden');
       const channelOpen = !document.getElementById('channel-sidebar').classList.contains('hidden');
       const membersOpen = !document.getElementById('members-sidebar').classList.contains('hidden');
-      backdrop.classList.toggle('hidden', !(channelOpen || membersOpen));
+      backdrop.classList.toggle('hidden', !(serversOpen || channelOpen || membersOpen));
     }
 
     function closeMobilePanels({ closeServers = false } = {}) {
@@ -4118,6 +4106,7 @@
         const willOpen = channel.classList.contains('hidden');
         channel.classList.toggle('hidden', !willOpen);
         members.classList.add('hidden');
+        servers.classList.add('hidden');
         updateMobileBackdrop();
         return;
       }
@@ -4125,11 +4114,16 @@
         const willOpen = members.classList.contains('hidden');
         members.classList.toggle('hidden', !willOpen);
         channel.classList.add('hidden');
+        servers.classList.add('hidden');
         updateMobileBackdrop();
         return;
       }
       if (panel === 'servers') {
-        servers.classList.toggle('hidden');
+        const willOpen = servers.classList.contains('hidden');
+        servers.classList.toggle('hidden', !willOpen);
+        channel.classList.add('hidden');
+        members.classList.add('hidden');
+        updateMobileBackdrop();
       }
     }
 
@@ -4160,6 +4154,9 @@
     document.getElementById('btn-toggle-servers').onclick = () => {
       if (isMobileViewport()) toggleMobilePanel('servers');
     };
+    document.getElementById('btn-toggle-members').onclick = () => {
+      if (isMobileViewport()) toggleMobilePanel('members');
+    };
     document.getElementById('mobile-panel-backdrop').onclick = () => closeMobilePanels();
     document.addEventListener('click', () => hideContextMenu());
     document.addEventListener('contextmenu', (e) => {
@@ -4170,6 +4167,8 @@
       if (!isMobileViewport()) {
         closeMobilePanels();
         document.getElementById('server-sidebar').classList.remove('hidden');
+      } else {
+        closeMobilePanels({ closeServers: true });
       }
       updateMobileBackdrop();
     });
@@ -4294,7 +4293,7 @@
         document.getElementById('main-app').classList.remove('hidden');
         if (isMobileViewport()) {
           document.getElementById('server-sidebar').classList.add('hidden');
-          closeMobilePanels({ closeServers: false });
+          closeMobilePanels({ closeServers: true });
         } else {
           document.getElementById('server-sidebar').classList.remove('hidden');
         }
