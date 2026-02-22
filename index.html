@@ -653,6 +653,16 @@
       return /[^\x00-\x7F]|[áéíóúñü¿¡àèìòùâêîôûäëïößç]/i.test(t);
     }
 
+    function looksEnglishEnough(text) {
+      const t = ` ${(text || '').toLowerCase()} `;
+      if (!t.trim()) return true;
+      if (/[¿¡]/.test(t)) return false;
+      const spanishMarkers = [' el ', ' la ', ' los ', ' las ', ' una ', ' un ', ' de ', ' que ', ' y ', ' en ', ' por ', ' para ', ' hola ', ' gracias ', ' como ', ' estas ', ' estoy ', ' buenos ', ' dias '];
+      let score = 0;
+      spanishMarkers.forEach((w) => { if (t.includes(w)) score++; });
+      return score <= 1;
+    }
+
     function renderFormattedText(rawText = '') {
       const escaped = escapeHtml(rawText);
       const inline = escaped
@@ -699,8 +709,8 @@
       return !!target;
     }
 
-    async function translateWithMistral(text, targetLanguageCode) {
-      const targetLabel = getLanguageLabel(targetLanguageCode);
+    async function requestMistralTranslation(text, targetLabel, forceStrict = false) {
+      const strictLine = forceStrict ? `Translate to ${targetLabel} only. Do not keep source language words except names.` : '';
       const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -714,6 +724,7 @@
           messages: [
             { role: 'system', content: `Translate the user text to ${targetLabel}. Preserve bullets, numbering, and markdown-style emphasis. Return only translated text.` },
             { role: 'system', content: `If the input is already in ${targetLabel}, return it unchanged.` },
+            { role: 'system', content: strictLine },
             { role: 'user', content: text }
           ]
         })
@@ -721,6 +732,19 @@
       if (!res.ok) throw new Error(`Translate failed (${res.status})`);
       const data = await res.json();
       return extractMistralText(data?.choices?.[0]?.message?.content) || text;
+    }
+
+    async function translateWithMistral(text, targetLanguageCode) {
+      const targetLabel = getLanguageLabel(targetLanguageCode);
+      const first = await requestMistralTranslation(text, targetLabel, false);
+      if (normalizeLanguageCode(targetLanguageCode) !== 'en') return first;
+      const sourceLooksNonEnglish = looksNonEnglish(text) || !looksEnglishEnough(text);
+      const outputLooksNonEnglish = !looksEnglishEnough(first);
+      if (sourceLooksNonEnglish && (outputLooksNonEnglish || first.trim().toLowerCase() === String(text || '').trim().toLowerCase())) {
+        const second = await requestMistralTranslation(text, targetLabel, true);
+        return second || first;
+      }
+      return first;
     }
 
     async function getTranslatedMessageText(messageId, text) {
