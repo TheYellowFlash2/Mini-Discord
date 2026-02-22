@@ -269,6 +269,8 @@
       '/joke - random dev joke',
       '/quote - random bot quote'
     ];
+    const BOT_CONVERSATION_IDLE_MS = 6 * 60 * 1000;
+    const botConversationByChannel = {};
     const PROFANITY_WORDS = ['fuck','fucking','shit','bitch','asshole','bastard','cunt','nigger','nigga','faggot','retard','whore','slut','dick','pussy'];
     const moderationCooldownByUser = {};
     let attachmentCleanupInterval = null;
@@ -735,6 +737,65 @@
       return '';
     }
 
+    function isBotOnlyServer(serverId = currentServerId) {
+      const srv = serverId ? servers[serverId] : null;
+      return !!srv?.botOnly;
+    }
+
+    function markBotConversationActive(channelId) {
+      if (!channelId) return;
+      botConversationByChannel[channelId] = { at: Date.now() };
+    }
+
+    function clearBotConversation(channelId) {
+      if (!channelId) return;
+      delete botConversationByChannel[channelId];
+    }
+
+    function messageLooksLikeTalkingToSomeoneElse(text) {
+      const t = String(text || '').trim();
+      if (!t) return false;
+      const lower = t.toLowerCase();
+      const atMention = lower.match(/@([a-z0-9_.-]+)/i);
+      if (atMention) {
+        const mentioned = (atMention[1] || '').toLowerCase();
+        if (!['bot', 'mistral', 'assistant', 'ai'].includes(mentioned)) return true;
+      }
+      const otherNames = Object.values(members)
+        .filter(m => m.serverId === currentServerId && m.userId !== currentUser?.uid && m.userId !== BOT_USER_ID)
+        .map(m => (getUserDisplayName(memberUserData[m.userId], m) || '').toLowerCase().trim())
+        .filter(Boolean);
+      return otherNames.some((name) => {
+        if (name.length < 2) return false;
+        return lower.startsWith(`${name}:`) || lower.startsWith(`${name},`) || lower.startsWith(`${name} `);
+      });
+    }
+
+    function shouldAutoContinueBotConversation(text, channelId) {
+      if (!channelId) return false;
+      if (isBotOnlyServer()) return true;
+      const state = botConversationByChannel[channelId];
+      if (!state) return false;
+      if (Date.now() - Number(state.at || 0) > BOT_CONVERSATION_IDLE_MS) {
+        clearBotConversation(channelId);
+        return false;
+      }
+      if (messageLooksLikeTalkingToSomeoneElse(text)) {
+        clearBotConversation(channelId);
+        return false;
+      }
+      return true;
+    }
+
+    function extractJsonObjectFromText(raw) {
+      const txt = String(raw || '').replace(/```json|```/gi, '').trim();
+      if (!txt) return '{}';
+      const start = txt.indexOf('{');
+      const end = txt.lastIndexOf('}');
+      if (start >= 0 && end > start) return txt.slice(start, end + 1);
+      return txt;
+    }
+
     function getAttachmentStoragePath(att) {
       if (!att) return '';
       if (att.storagePath) return att.storagePath;
@@ -1085,9 +1146,11 @@
         const details = String(reportData.details || '');
         const prompt = [
           'You are a strict moderation reviewer for a public chat.',
-          'Return only JSON with keys: action, minutes, reason.',
-          'action must be "none" or "suspend".',
-          'minutes must be an integer 0..1440.',
+          'Return ONLY one JSON object with keys: action, minutes, reason.',
+          'action must be exactly "none" or "suspend".',
+          'minutes must be an integer between 0 and 1440.',
+          'If action is "none", set minutes to 0.',
+          'Example: {"action":"suspend","minutes":120,"reason":"Harassment"}',
           `Report reason: ${reason}`,
           `Report details: ${details || '(none)'}`,
           'Suspend only when content indicates clear harassment, hate, threats, or spam abuse.'
@@ -1111,23 +1174,26 @@
         if (!res.ok) throw new Error('Review unavailable');
         const data = await res.json();
         const targetChannelId = currentChannelId || (Object.values(channels).find(c => c.serverId === PUBLIC_SERVER_ID)?.id || '');
-        const raw = (extractMistralText(data?.choices?.[0]?.message?.content) || '{}').replace(/```json|```/gi, '').trim();
+        const raw = extractMistralText(data?.choices?.[0]?.message?.content) || '{}';
+        const jsonRaw = extractJsonObjectFromText(raw);
         let parsed = {};
-        try { parsed = JSON.parse(raw); } catch (_) { parsed = {}; }
+        try { parsed = JSON.parse(jsonRaw); } catch (_) { parsed = {}; }
         const action = String(parsed.action || 'none').toLowerCase();
         const minutes = Math.max(0, Math.min(1440, Math.floor(Number(parsed.minutes || 0))));
         const reviewReason = String(parsed.reason || reason || 'Policy violation').slice(0, 180);
-        if (action === 'suspend' && minutes > 0) {
-          const untilMs = Date.now() + (minutes * 60 * 1000);
+        const strictAutoSuspend = textHasProfanity(`${reason} ${details}`);
+        if ((action === 'suspend' && minutes > 0) || strictAutoSuspend) {
+          const appliedMinutes = strictAutoSuspend && minutes === 0 ? 120 : Math.max(1, minutes);
+          const untilMs = Date.now() + (appliedMinutes * 60 * 1000);
           await setDoc(doc(db, 'servers', PUBLIC_SERVER_ID, 'suspended', reportedUserId), {
             userId: reportedUserId,
-            reason: `[BOT-AUTO] ${reviewReason}`,
+            reason: `[BOT-AUTO] ${strictAutoSuspend ? 'Policy keywords detected' : reviewReason}`,
             reviewSource: 'public-report-bot',
             suspendedBy: currentUser.uid,
             suspendedAt: serverTimestamp(),
             untilMs
           }, { merge: true });
-          await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, `Report reviewed: user suspended for ${minutes} minute(s). Reason: ${reviewReason}`);
+          await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, `Report reviewed: user suspended for ${appliedMinutes} minute(s). Reason: ${strictAutoSuspend ? 'Policy keywords detected' : reviewReason}`);
         } else {
           await sendBotMessage(PUBLIC_SERVER_ID, targetChannelId, 'Report reviewed: no suspension applied.');
         }
@@ -1350,6 +1416,7 @@
       await signOut(auth);
       currentServerId = null;
       currentChannelId = null;
+      updateServerActionButtons();
       document.getElementById('auth-screen').classList.remove('hidden');
       document.getElementById('main-app').classList.add('hidden');
     }
@@ -1584,21 +1651,29 @@
       });
     }
 
-    async function createServer(name, iconFile) {
+    async function createServer(name, iconFile, options = {}) {
       if (!currentUser?.uid) return;
       try {
+        const botChat = !!options.botChat;
         const serverRef = doc(collection(db, 'servers'));
         let iconUrl = '';
-        if (iconFile) {
+        if (iconFile && !botChat) {
           const r = ref(storage, `servers/${serverRef.id}/icon`);
           await uploadBytes(r, iconFile);
           iconUrl = await getDownloadURL(r);
         }
-        await setDoc(serverRef, { name: name || 'New Server', ownerId: currentUser.uid, icon: iconUrl, createdAt: serverTimestamp() });
+        const serverName = botChat ? (name || 'Bot Chat') : (name || 'New Server');
+        await setDoc(serverRef, { name: serverName, ownerId: currentUser.uid, icon: iconUrl, botOnly: botChat, createdAt: serverTimestamp() });
         await setDoc(doc(db, 'servers', serverRef.id, 'members', currentUser.uid), { role: 'owner' });
         const chRef = doc(collection(db, 'channels'));
-        await setDoc(chRef, { serverId: serverRef.id, name: 'general', createdAt: serverTimestamp() });
+        await setDoc(chRef, { serverId: serverRef.id, name: botChat ? 'bot-chat' : 'general', createdAt: serverTimestamp() });
         await setDoc(doc(collection(db, 'memberships')), { serverId: serverRef.id, userId: currentUser.uid, role: 'owner' });
+        if (botChat) {
+          ensureGlobalBotProfile().catch(() => {});
+          await setDoc(doc(db, 'servers', serverRef.id, 'members', BOT_USER_ID), { role: 'bot' }, { merge: true });
+          await setDoc(doc(collection(db, 'memberships')), { serverId: serverRef.id, userId: BOT_USER_ID, role: 'bot' });
+          await sendBotMessage(serverRef.id, chRef.id, `Welcome to your private bot chat. You can talk naturally here and I will respond without needing "bot". Try /help.`);
+        }
         showToast('Server created!', 'success');
         modal.closeModal();
         loadServers();
@@ -1746,6 +1821,7 @@
       lastSuspensionNoticeKey = '';
       startActiveSuspensionWatcher(serverId);
       document.getElementById('current-server-name').textContent = servers[serverId]?.name || 'Server';
+      updateServerActionButtons();
       loadChannels(serverId);
       loadMembers();
       document.getElementById('messages-loading').classList.remove('hidden');
@@ -1815,6 +1891,7 @@
           currentChannelId = null;
           renderChannelList();
           renderMessages();
+          updateServerActionButtons();
         }
         if (!currentServerId && Object.keys(servers).length > 0) {
           const first = servers[PUBLIC_SERVER_ID] ? PUBLIC_SERVER_ID : Object.keys(servers)[0];
@@ -2058,6 +2135,12 @@
       }
       if (!text && pendingAttachments.length === 0) return;
       const botPrompt = extractBotPrompt(text);
+      const continueBot = shouldAutoContinueBotConversation(text, currentChannelId);
+      const shouldTalkToBot = !!botPrompt || continueBot || isBotOnlyServer();
+      const botInput = botPrompt || text;
+      if (messageLooksLikeTalkingToSomeoneElse(text) && !isBotOnlyServer()) {
+        clearBotConversation(currentChannelId);
+      }
       try {
         const expiringAttachments = pendingAttachments.filter(att => getAttachmentStoragePath(att) && Number(att.expiresAt) > 0);
         const nextAttachmentExpiry = expiringAttachments.length
@@ -2083,8 +2166,9 @@
         document.getElementById('attachment-preview').classList.add('hidden');
         document.getElementById('attachment-preview').innerHTML = '';
         updateTyping(false);
-        if (botPrompt) {
-          await handleBotCommand(botPrompt, { alreadyPrompt: true, silentOnEmpty: true });
+        if (shouldTalkToBot && botInput.trim()) {
+          markBotConversationActive(currentChannelId);
+          await handleBotCommand(botInput, { alreadyPrompt: true, silentOnEmpty: true });
         }
       } catch (e) {
         showToast(e.message || 'Failed to send message', 'error');
@@ -2126,6 +2210,10 @@
     async function createInvite() {
       if (!currentServerId || !currentUser?.uid) {
         showToast('Select a server first', 'error');
+        return;
+      }
+      if (isBotOnlyServer()) {
+        showToast('Invites are disabled for Bot Chat servers', 'error');
         return;
       }
       const code = Math.random().toString(36).slice(2, 10).toUpperCase();
@@ -2201,6 +2289,16 @@
         loadMembers();
         modal.closeModal();
       } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    function updateServerActionButtons() {
+      const inviteBtn = document.getElementById('btn-invite');
+      if (!inviteBtn) return;
+      const botOnly = isBotOnlyServer();
+      inviteBtn.disabled = botOnly;
+      inviteBtn.title = botOnly ? 'Disabled for Bot Chat server' : 'Invite';
+      inviteBtn.classList.toggle('opacity-50', botOnly);
+      inviteBtn.classList.toggle('cursor-not-allowed', botOnly);
     }
 
     async function suspendUser(userId, durationMs, reason = '') {
@@ -2684,6 +2782,10 @@
             <label class="block text-sm text-gray-400 mb-1">Server Name</label>
             <input type="text" id="server-name" placeholder="My Server" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
           </div>
+          <label class="flex items-center gap-2 text-sm text-gray-300">
+            <input type="checkbox" id="server-bot-chat" class="accent-discord-blurple">
+            Create as private Bot Chat (you + bot only, no invites)
+          </label>
           <div>
             <label class="block text-sm text-gray-400 mb-1">Server Icon (optional)</label>
             <label for="server-icon" class="inline-block px-4 py-2 rounded bg-discord-dark hover:bg-discord-blurple text-gray-300 hover:text-white text-sm font-medium cursor-pointer transition border border-discord-darkest">Choose Image</label>
@@ -2692,9 +2794,18 @@
           <button type="submit" class="w-full py-2 bg-discord-blurple hover:bg-indigo-600 rounded font-medium">Create</button>
         </form>
       `);
+      document.getElementById('server-bot-chat').onchange = (e) => {
+        const checked = !!e.target.checked;
+        const iconInput = document.getElementById('server-icon');
+        if (iconInput && checked) iconInput.value = '';
+      };
       document.getElementById('create-server-form').onsubmit = (e) => {
         e.preventDefault();
-        createServer(document.getElementById('server-name').value, document.getElementById('server-icon').files?.[0]);
+        createServer(
+          document.getElementById('server-name').value,
+          document.getElementById('server-icon').files?.[0],
+          { botChat: !!document.getElementById('server-bot-chat')?.checked }
+        );
       };
     }
 
@@ -2846,6 +2957,9 @@
         memberUserData = {};
         userPresence = {};
         currentUser = null;
+        currentServerId = null;
+        currentChannelId = null;
+        updateServerActionButtons();
         document.getElementById('auth-screen').classList.remove('hidden');
         document.getElementById('main-app').classList.add('hidden');
       }
