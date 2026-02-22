@@ -220,6 +220,7 @@
     let unsubReports = null;
     let reportAlertInitialized = false;
     const seenReportAlerts = new Set();
+    let openReports = {};
     let serversLoadVersion = 0;
     let membersLoadVersion = 0;
     let presenceInterval = null;
@@ -448,32 +449,41 @@
     function subscribeReports() {
       if (unsubReports) { unsubReports(); unsubReports = null; }
       reportAlertInitialized = false;
+      openReports = {};
       if (!currentServerId || !currentUser?.uid || !isAdmin()) return;
       const q = query(
         collection(db, 'reports'),
         where('serverId', '==', currentServerId),
-        where('status', '==', 'open'),
-        orderBy('createdAt', 'desc'),
-        limit(25)
+        limit(100)
       );
       unsubReports = onSnapshot(q, (snap) => {
+        const nextOpen = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          if (data?.status === 'open') nextOpen[d.id] = { id: d.id, ...data };
+        });
+        openReports = nextOpen;
         if (!reportAlertInitialized) {
-          snap.docs.forEach((d) => {
+          Object.values(openReports).forEach((d) => {
             if (!seenReportAlerts.has(d.id)) {
               seenReportAlerts.add(d.id);
-              maybeNotifyForReport(d.id, d.data());
+              maybeNotifyForReport(d.id, d);
             }
           });
           reportAlertInitialized = true;
           return;
         }
         snap.docChanges().forEach((change) => {
-          if (change.type !== 'added') return;
-          if (seenReportAlerts.has(change.doc.id)) return;
-          seenReportAlerts.add(change.doc.id);
-          maybeNotifyForReport(change.doc.id, change.doc.data());
+          const data = change.doc.data() || {};
+          if (data.status !== 'open') return;
+          if (change.type !== 'added' && change.type !== 'modified') return;
+          if (!seenReportAlerts.has(change.doc.id)) {
+            seenReportAlerts.add(change.doc.id);
+            maybeNotifyForReport(change.doc.id, data);
+          }
         });
       }, (err) => {
+        showToast('Report alerts failed to subscribe', 'error');
         if (DEBUG_MODE) console.error('Report subscription failed', err);
       });
     }
@@ -1103,6 +1113,7 @@
       currentServerId = serverId;
       currentChannelId = null;
       seenReportAlerts.clear();
+      openReports = {};
       document.getElementById('current-server-name').textContent = servers[serverId]?.name || 'Server';
       loadChannels(serverId);
       loadMembers();
@@ -1596,6 +1607,35 @@
       if (!isAdmin()) return;
       const srv = servers[currentServerId];
       const isOwner = srv?.ownerId === currentUser?.uid;
+      const reportRows = Object.values(openReports)
+        .filter(r => r.serverId === currentServerId && r.status === 'open')
+        .sort((a, b) => {
+          const at = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : 0;
+          const bt = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0;
+          return bt - at;
+        })
+        .map(r => {
+          const reportedUser = memberUserData[r.reportedUserId] || {};
+          const reporterUser = memberUserData[r.reportedBy] || {};
+          const reportedName = getUserDisplayName(reportedUser, {}) || 'Unknown';
+          const reporterName = getUserDisplayName(reporterUser, { displayName: r.reportedByDisplayName || 'User' }) || 'User';
+          const reason = (r.reason || 'Other').trim();
+          const details = (r.details || '').trim();
+          return `
+            <div class="rounded border border-discord-dark bg-discord-darkest/40 p-3">
+              <div class="flex items-center justify-between gap-2">
+                <div class="text-sm text-gray-200">${escapeHtml(reportedName)} <span class="text-gray-500">reported by ${escapeHtml(reporterName)}</span></div>
+                <span class="text-xs text-gray-500">${formatTime(r.createdAt)}</span>
+              </div>
+              <div class="text-xs text-amber-300 mt-1">Reason: ${escapeHtml(reason)}</div>
+              ${details ? `<div class="text-xs text-gray-400 mt-1">${escapeHtml(details)}</div>` : ''}
+              <div class="mt-2 flex gap-2">
+                <button type="button" class="text-xs px-2 py-1 rounded bg-discord-red hover:bg-red-500" data-report-inbox-kick="${r.id}" data-reported-user="${r.reportedUserId}">Kick</button>
+                <button type="button" class="text-xs px-2 py-1 rounded bg-discord-dark hover:bg-discord-darker" data-report-inbox-dismiss="${r.id}">Dismiss</button>
+              </div>
+            </div>
+          `;
+        }).join('');
       const memberRows = Object.values(members).filter(m => m.serverId === currentServerId).map(m => {
         const ud = memberUserData[m.userId] || {};
         const displayName = getUserDisplayName(ud, m) || 'Unknown';
@@ -1642,6 +1682,10 @@
             <div class="space-y-0">${channelRows || '<p class="text-gray-500 py-2">No channels</p>'}</div>
             <button type="button" id="admin-create-channel" class="mt-2 text-sm px-3 py-1.5 rounded bg-discord-blurple hover:bg-indigo-600">+ Create Channel</button>
           </div>
+          <div>
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">Reports Inbox</h3>
+            <div class="max-h-60 overflow-y-auto space-y-2">${reportRows || '<p class="text-gray-500 py-2">No open reports</p>'}</div>
+          </div>
           ${isOwner ? `
             <div>
               <h3 class="text-sm font-semibold text-gray-400 mb-2">Message Cleanup (Owner)</h3>
@@ -1674,6 +1718,14 @@
       document.querySelectorAll('[data-remove-admin]').forEach(btn => btn.onclick = () => removeAdmin(btn.dataset.removeAdmin));
       document.querySelectorAll('[data-delete-channel]').forEach(btn => btn.onclick = () => {
         if (confirm('Delete this channel?')) deleteChannel(btn.dataset.deleteChannel);
+      });
+      document.querySelectorAll('[data-report-inbox-kick]').forEach(btn => btn.onclick = async () => {
+        await resolveReport(btn.dataset.reportInboxKick, 'kicked', btn.dataset.reportedUser || '');
+        renderAdminModal();
+      });
+      document.querySelectorAll('[data-report-inbox-dismiss]').forEach(btn => btn.onclick = async () => {
+        await resolveReport(btn.dataset.reportInboxDismiss, 'dismissed');
+        renderAdminModal();
       });
       document.getElementById('admin-create-channel').onclick = () => { modal.closeModal(); renderCreateChannelModal(); };
       if (isOwner) {
@@ -2090,6 +2142,7 @@
         if (unsubReports) { unsubReports(); unsubReports = null; }
         reportAlertInitialized = false;
         seenReportAlerts.clear();
+        openReports = {};
         clearMemberUserListeners();
         memberUserData = {};
         userPresence = {};
