@@ -2652,16 +2652,26 @@
         showSuspensionLockModal(servers[currentServerId]?.name || 'this server', activeSuspension);
         return;
       }
-      if (activeVoiceChannelId && activeVoiceChannelId !== channelId) {
-        await leaveActiveVoiceChannel();
+      try {
+        if (activeVoiceChannelId && activeVoiceChannelId !== channelId) {
+          await leaveActiveVoiceChannel();
+        }
+        activeVoiceChannelId = channelId;
+        await setDoc(doc(db, 'channels', channelId, 'voiceMembers', currentUser.uid), {
+          userId: currentUser.uid,
+          displayName: currentUser.displayName || 'User',
+          joinedAt: serverTimestamp()
+        }, { merge: true });
+        renderVoicePanel();
+      } catch (err) {
+        activeVoiceChannelId = null;
+        const msg = String(err?.message || '');
+        if (/missing or insufficient permissions/i.test(msg)) {
+          showToast('Voice join blocked by Firestore rules. Publish latest firestore.rules.', 'error');
+        } else {
+          showToast(err?.message || 'Failed to join voice', 'error');
+        }
       }
-      activeVoiceChannelId = channelId;
-      await setDoc(doc(db, 'channels', channelId, 'voiceMembers', currentUser.uid), {
-        userId: currentUser.uid,
-        displayName: currentUser.displayName || 'User',
-        joinedAt: serverTimestamp()
-      }, { merge: true });
-      renderVoicePanel();
     }
 
     function subscribeVoiceMembers(channelId) {
