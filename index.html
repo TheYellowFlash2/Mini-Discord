@@ -245,22 +245,7 @@
     const NOTIFICATION_PREF_KEY = 'mini_discord_notifications_enabled';
     let notificationsEnabled = localStorage.getItem(NOTIFICATION_PREF_KEY) === 'true';
     const REPORT_REASONS = ['Harassment', 'Spam', 'Hate Speech', 'Threats', 'Impersonation', 'Other'];
-    const LANGUAGE_OPTIONS = [
-      { code: 'en', label: 'English' },
-      { code: 'es', label: 'Spanish' },
-      { code: 'fr', label: 'French' },
-      { code: 'de', label: 'German' },
-      { code: 'pt', label: 'Portuguese' },
-      { code: 'hi', label: 'Hindi' },
-      { code: 'ja', label: 'Japanese' },
-      { code: 'ko', label: 'Korean' },
-      { code: 'zh', label: 'Chinese' },
-      { code: 'ar', label: 'Arabic' }
-    ];
     const BOT_MEMORY_LIMIT = 6;
-    let userLanguage = localStorage.getItem('mini_discord_language') || 'en';
-    const translationCache = {};
-    const translationPending = {};
 
     const EMOJI_CATEGORIES = {
       'Smileys': ['😀','😃','😄','😁','😆','😅','🤣','😂','🙂','🙃','😉','😊','😇','🥰','😍','🤩','😘','😗','☺','😚','😙','🥲','😋','😛','😜','🤪','😝','🤑','🤗','🤭','🤫','🤔','🤐','🤨','😐','😑','😶','😏','😒','🙄','😬','🤥','😌','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🤧','🥵','🥶','🥴','😵','🤯','🤠','🥳','🥸'],
@@ -636,33 +621,6 @@
       return String(content).trim();
     }
 
-    function normalizeLanguageCode(code) {
-      const c = String(code || '').toLowerCase().trim();
-      return LANGUAGE_OPTIONS.some(x => x.code === c) ? c : 'en';
-    }
-
-    function getLanguageLabel(code) {
-      const c = normalizeLanguageCode(code);
-      const match = LANGUAGE_OPTIONS.find(x => x.code === c);
-      return match ? match.label : 'English';
-    }
-
-    function looksNonEnglish(text) {
-      const t = (text || '').trim();
-      if (!t) return false;
-      return /[^\x00-\x7F]|[áéíóúñü¿¡àèìòùâêîôûäëïößç]/i.test(t);
-    }
-
-    function looksEnglishEnough(text) {
-      const t = ` ${(text || '').toLowerCase()} `;
-      if (!t.trim()) return true;
-      if (/[¿¡]/.test(t)) return false;
-      const spanishMarkers = [' el ', ' la ', ' los ', ' las ', ' una ', ' un ', ' de ', ' que ', ' y ', ' en ', ' por ', ' para ', ' hola ', ' gracias ', ' como ', ' estas ', ' estoy ', ' buenos ', ' dias '];
-      let score = 0;
-      spanishMarkers.forEach((w) => { if (t.includes(w)) score++; });
-      return score <= 1;
-    }
-
     function renderFormattedText(rawText = '') {
       const escaped = escapeHtml(rawText);
       const inline = escaped
@@ -700,70 +658,6 @@
       if (!rawText) return '';
       if (isBot) return renderFormattedText(rawText);
       return escapeHtml(rawText).replace(/\r?\n/g, '<br>');
-    }
-
-    function shouldTranslateForViewer(text = '') {
-      const target = normalizeLanguageCode(userLanguage);
-      const trimmed = (text || '').trim();
-      if (!trimmed) return false;
-      return !!target;
-    }
-
-    async function requestMistralTranslation(text, targetLabel, forceStrict = false) {
-      const strictLine = forceStrict ? `Translate to ${targetLabel} only. Do not keep source language words except names.` : '';
-      const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${MISTRAL_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: BOT_MODEL,
-          temperature: 0.2,
-          max_tokens: 500,
-          messages: [
-            { role: 'system', content: `Translate the user text to ${targetLabel}. Preserve bullets, numbering, and markdown-style emphasis. Return only translated text.` },
-            { role: 'system', content: `If the input is already in ${targetLabel}, return it unchanged.` },
-            { role: 'system', content: strictLine },
-            { role: 'user', content: text }
-          ]
-        })
-      });
-      if (!res.ok) throw new Error(`Translate failed (${res.status})`);
-      const data = await res.json();
-      return extractMistralText(data?.choices?.[0]?.message?.content) || text;
-    }
-
-    async function translateWithMistral(text, targetLanguageCode) {
-      const targetLabel = getLanguageLabel(targetLanguageCode);
-      const first = await requestMistralTranslation(text, targetLabel, false);
-      if (normalizeLanguageCode(targetLanguageCode) !== 'en') return first;
-      const sourceLooksNonEnglish = looksNonEnglish(text) || !looksEnglishEnough(text);
-      const outputLooksNonEnglish = !looksEnglishEnough(first);
-      if (sourceLooksNonEnglish && (outputLooksNonEnglish || first.trim().toLowerCase() === String(text || '').trim().toLowerCase())) {
-        const second = await requestMistralTranslation(text, targetLabel, true);
-        return second || first;
-      }
-      return first;
-    }
-
-    async function getTranslatedMessageText(messageId, text) {
-      const target = normalizeLanguageCode(userLanguage);
-      if (!shouldTranslateForViewer(text)) return text;
-      const key = `${target}:${messageId}:${text}`;
-      if (translationCache[key]) return translationCache[key];
-      if (translationPending[key]) return translationPending[key];
-      translationPending[key] = translateWithMistral(text, target)
-        .then((translated) => {
-          translationCache[key] = translated || text;
-          delete translationPending[key];
-          return translationCache[key];
-        })
-        .catch(() => {
-          delete translationPending[key];
-          return text;
-        });
-      return translationPending[key];
     }
 
     async function getBotMemory(userId) {
@@ -1183,7 +1077,6 @@
           displayName: displayName || email.split('@')[0],
           bio: '',
           photoURL: '',
-          preferredLanguage: normalizeLanguageCode(userLanguage),
           createdAt: serverTimestamp(),
           status: 'offline'
         });
@@ -1278,13 +1171,6 @@
             <label class="block text-sm text-gray-400 mb-1">About Me</label>
             <textarea id="profile-bio" rows="3" maxlength="200" placeholder="Say something about yourself" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple resize-none">${escapeHtml(currentUser?.bio || '')}</textarea>
           </div>
-          <div>
-            <label class="block text-sm text-gray-400 mb-1">Language</label>
-            <select id="profile-language" class="w-full bg-discord-dark border border-discord-darkest rounded px-3 py-2 outline-none focus:border-discord-blurple">
-              ${LANGUAGE_OPTIONS.map((lang) => `<option value="${lang.code}" ${normalizeLanguageCode(currentUser?.preferredLanguage) === lang.code ? 'selected' : ''}>${lang.label}</option>`).join('')}
-            </select>
-            <div class="text-xs text-gray-500 mt-1">Messages will be shown in this language for you, including older messages.</div>
-          </div>
           <div class="rounded border border-discord-dark bg-discord-dark/40 p-3">
             <div class="flex items-center justify-between gap-2">
               <div>
@@ -1322,17 +1208,12 @@
         e.preventDefault();
         const name = document.getElementById('profile-display').value.trim();
         const bio = document.getElementById('profile-bio').value.trim();
-        const preferredLanguage = normalizeLanguageCode(document.getElementById('profile-language').value);
         if (!name) return;
         try {
-          await updateDoc(doc(db, 'users', currentUser.uid), { displayName: name, bio, preferredLanguage });
+          await updateDoc(doc(db, 'users', currentUser.uid), { displayName: name, bio });
           currentUser.displayName = name;
           currentUser.bio = bio;
-          currentUser.preferredLanguage = preferredLanguage;
-          userLanguage = preferredLanguage;
-          localStorage.setItem('mini_discord_language', preferredLanguage);
           updateUserPill();
-          renderMessages();
           showToast('Profile updated!', 'success');
           modal.closeModal();
         } catch (err) { showToast(err.message, 'error'); }
@@ -1777,13 +1658,6 @@
         };
         const reportBtnEl = div.querySelector('[data-report-msg-user]');
         if (reportBtnEl) reportBtnEl.onclick = () => renderReportUserModal(reportBtnEl.dataset.reportMsgUser);
-        if (rawText && shouldTranslateForViewer(rawText)) {
-          getTranslatedMessageText(m.id, rawText).then((translated) => {
-            const textEl = document.getElementById(textBlockId);
-            if (!textEl) return;
-            textEl.innerHTML = renderMessageText(translated || rawText, isBot);
-          }).catch(() => {});
-        }
       });
       list.scrollTop = list.scrollHeight;
     }
@@ -2531,15 +2405,12 @@
           displayName: existing.displayName || user.displayName || user.email?.split('@')[0] || 'User',
           photoURL: existing.photoURL || user.photoURL || '',
           bio: existing.bio || '',
-          preferredLanguage: normalizeLanguageCode(existing.preferredLanguage || userLanguage),
           status: existing.status || 'offline'
         };
         if (!u.exists()) ensuredProfile.createdAt = serverTimestamp();
         await setDoc(userRef, ensuredProfile, { merge: true });
         const d = ensuredProfile;
-        currentUser = { uid: user.uid, displayName: d?.displayName || user.email?.split('@')[0], bio: d?.bio || '', photoURL: d?.photoURL || user.photoURL || '', preferredLanguage: normalizeLanguageCode(d?.preferredLanguage || 'en') };
-        userLanguage = currentUser.preferredLanguage;
-        localStorage.setItem('mini_discord_language', userLanguage);
+        currentUser = { uid: user.uid, displayName: d?.displayName || user.email?.split('@')[0], bio: d?.bio || '', photoURL: d?.photoURL || user.photoURL || '' };
         document.getElementById('auth-screen').classList.add('hidden');
         document.getElementById('main-app').classList.remove('hidden');
         updateUserPill();
